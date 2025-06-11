@@ -64,3 +64,72 @@ class FilteredExperienceComments(db.Model):
 class DailyCommentsWithEvaluation(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     archivo_binario = db.Column(db.LargeBinary)
+
+
+
+
+# TABLAS PARA GUARDAR REPORTES EN SQL>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+
+class Usuarios_Por_Asignacion(db.Model):
+    __tablename__ = 'usuarios_por_asignacion'
+
+    id = db.Column(db.Integer, primary_key=True)
+    id_asignacion    = db.Column(db.String(50),  nullable=True, default="")
+    dni              = db.Column(db.String(20),  nullable=True, default="")
+    nombre_completo  = db.Column(db.String(255), nullable=True, default="")
+    rol_funcion      = db.Column(db.String(255), nullable=True, default="")
+    id_pertenencia   = db.Column(db.String(50),  nullable=True, default="")
+    pertenencia      = db.Column(db.String(255), nullable=True, default="")
+    estatus_usuario  = db.Column(db.String(100), nullable=True, default="")
+    fecha_suspension = db.Column(db.DateTime,   nullable=True)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def serialize(self):
+        return {
+            'id': self.id,
+            'id_asignacion': self.id_asignacion,
+            'dni': self.dni,
+            'nombre_completo': self.nombre_completo,
+            'rol_funcion': self.rol_funcion,
+            'id_pertenencia': self.id_pertenencia,
+            'pertenencia': self.pertenencia,
+            'estatus_usuario': self.estatus_usuario,
+            'fecha_suspension': self.fecha_suspension.isoformat() if self.fecha_suspension else None,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
+
+    def __repr__(self):
+        return f"<Usuarios_Por_Asignacion(id={self.id}, asignacion={self.id_asignacion})>"
+    
+
+class Usuarios_Sin_ID(db.Model):
+    __tablename__ = 'usuarios_sin_id'
+
+    id = db.Column(db.Integer, primary_key=True)
+    nombre_usuario            = db.Column(db.String(255), nullable=True, default="")
+    dni                       = db.Column(db.String(20), nullable=True, default="")
+    email                     = db.Column(db.String(255), nullable=True, default="")
+    ultimo_inicio_sesion      = db.Column(db.DateTime, nullable=True)
+    estatus_usuario           = db.Column(db.String(100), nullable=True, default="")
+    ultimo_acceso             = db.Column(db.DateTime, nullable=True)
+    fecha_ingreso             = db.Column(db.DateTime, nullable=True)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def serialize(self):
+        return {
+            'id': self.id,
+            'nombre_usuario': self.nombre_usuario,
+            'dni': self.dni,
+            'email': self.email,
+            'ultimo_inicio_sesion': self.ultimo_inicio_sesion.isoformat() if self.ultimo_inicio_sesion else None,
+            'estatus_usuario': self.estatus_usuario,
+            'ultimo_acceso': self.ultimo_acceso.isoformat() if self.ultimo_acceso else None,
+            'fecha_ingreso': self.fecha_ingreso.isoformat() if self.fecha_ingreso else None,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
+
+    def __repr__(self):
+        return f"<Usuarios_Sin_ID(id={self.id}, nombre_usuario={self.nombre_usuario})>"

@@ -10,6 +10,8 @@ from utils.data_mentor_utils import query_assistant_mentor
 import urllib.request
 import urllib.error
 import json
+from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID
+
 
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
@@ -105,3 +107,49 @@ def horas_por_curso():
         {"curso": "Flask Fullstack", "horas": 9}
     ]
     return jsonify(data)
+
+
+
+# -------------------------- ACA VIENEN LAS RUTAS DE LAS TABLAS DE REPORTES ----------------------------
+
+
+
+
+
+@data_mentor_bp.route('/usuarios_por_asignacion/<int:registro_id>', methods=['GET'])
+def get_usuario_por_asignacion(registro_id):
+    """
+    Devuelve el registro de Usuarios_Por_Asignacion con el id dado,
+    usando el método serialize() del modelo.
+    """
+    logger.info(f"Buscando Usuarios_Por_Asignacion id={registro_id}")
+    registro = Usuarios_Por_Asignacion.query.get(registro_id)
+
+    if not registro:
+        logger.warning(f"Usuarios_Por_Asignacion id={registro_id} no encontrado")
+        return jsonify({
+            'error': 'Registro no encontrado',
+            'status': 404
+        }), 404
+
+    logger.info(f"Registro encontrado: {registro}")
+    return jsonify(registro.serialize()), 200
+
+@data_mentor_bp.route('/usuarios_sin_id/<int:registro_id>', methods=['GET'])
+def get_usuario_sin_id(registro_id):
+    """
+    Devuelve el registro de Usuarios_Sin_ID con el id dado,
+    usando el método serialize() del modelo.
+    """
+    logger.info(f"Buscando Usuarios_Sin_ID id={registro_id}")
+    registro = Usuarios_Sin_ID.query.get(registro_id)
+
+    if not registro:
+        logger.warning(f"Usuarios_Sin_ID id={registro_id} no encontrado")
+        return jsonify({
+            'error': 'Registro no encontrado',
+            'status': 404
+        }), 404
+
+    logger.info(f"Registro encontrado: {registro}")
+    return jsonify(registro.serialize()), 200

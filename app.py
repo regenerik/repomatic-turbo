@@ -181,5 +181,7 @@ with app.app_context():
 if __name__ == '__main__':
     app.run()
 
-# EJECUTO CON : myenv\Scripts\activate
-# waitress-serve --port=5000 app:app
+# Primera vez creo el environment: python -m venv myenv
+# EJECUTO ENV CON : myenv\Scripts\activate
+# pRIMERA VEZ INSTALO DEPENDENCIAS : pip install -r requirements.txt
+# EJECUTO SERVER CON : waitress-serve --port=5000 app:app

@@ -5,7 +5,7 @@ import re
 import pandas as pd
 from io import BytesIO
 from database import db
-from models import Reporte, TodosLosReportes, Survey, AllApiesResumes, AllCommentsWithEvaluation, FilteredExperienceComments
+from models import Reporte, TodosLosReportes, Usuarios_Sin_ID
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -15,6 +15,8 @@ load_dotenv()
 import os
 from logging_config import logger
 import gc
+import csv
+
 # Zona horaria de São Paulo/Buenos Aires
 tz = pytz.timezone('America/Sao_Paulo')
 
@@ -168,9 +170,156 @@ def exportar_reporte_json(username, password, report_url):
 
 # -----------------------------------UTILS PARA LLAMADA MULTIPLE------------------------------------
 
+
+
+# ---- funciones dedicadas para cada URL “especial” ----
+def procesar_usuarios_por_asignacion(csv_bytes_io):
+    """
+    Ejemplo de función que parsea el CSV y guarda cada fila
+    en la tabla InscripcionMarketplace.
+    """
+    csv_bytes_io.seek(0)
+    decoded = csv_bytes_io.read().decode('utf-8', errors='replace')
+    lines = decoded.splitlines()
+    reader = csv.DictReader(lines)
+    from models import Usuarios_Por_Asignacion  # tu modelo SQLAlchemy
+    for row in reader:
+        fecha_str = row.get('fecha_suspension', '').strip()
+        if fecha_str:
+            try:
+                # ajustá el formato si tu CSV viene con otro (ej: '07/04/2025')
+                fecha_susp = datetime.strptime(fecha_str, '%Y-%m-%d')
+            except ValueError:
+                logger.warning(f"Fecha inválida '{fecha_str}', seteando None")
+                fecha_susp = None
+        else:
+            fecha_susp = None
+        insc = Usuarios_Por_Asignacion(
+            id_asignacion    = row.get('ID Asignación'),
+            dni              = row.get('DNI'),
+            nombre_completo  = row.get('Nombre Completo'),
+            rol_funcion      = row.get('Rol/Función'),
+            id_pertenencia   = row.get('ID Pertenencia'),
+            pertenencia      = row.get('Pertenencia'),
+            estatus_usuario  = row.get('Estatus del Usuario'),
+            fecha_suspension = fecha_susp,
+        )
+        db.session.add(insc)
+    db.session.commit()
+    logger.info("✓ Filas de 'Inscripciones Marketplace' guardadas en InscripcionMarketplace.")
+
+def procesar_usuarios_sin_id(csv_bytes_io):
+    csv_bytes_io.seek(0)
+    decoded = csv_bytes_io.read().decode('utf-8', errors='replace')
+    lines = decoded.splitlines()
+    reader = csv.DictReader(lines)
+
+    def parse_date(val):
+        v = val.strip()
+        if not v or v.lower().startswith('hace '):
+            return None
+        for fmt in ('%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y'):
+            try:
+                return datetime.strptime(v, fmt)
+            except ValueError:
+                continue
+        logger.debug(f"parse_date: no pude convertir '{v}', lo dejo None")
+        return None
+
+    for row in reader:
+        ultimo_login  = parse_date(row.get('Último inicio de sesión del usuario', ''))
+        ultimo_acceso = parse_date(row.get('Último Acceso', ''))
+        fecha_ingreso = parse_date(row.get('Fecha de Ingreso', ''))
+
+        usuario = Usuarios_Sin_ID(
+            nombre_usuario       = row.get('Nombre del usuario', '').strip(),
+            dni                  = row.get('DNI', '').strip(),
+            email                = row.get('Email', '').strip(),
+            ultimo_inicio_sesion = ultimo_login,
+            estatus_usuario      = row.get('Estatus del Usuario', '').strip(),
+            ultimo_acceso        = ultimo_acceso,
+            fecha_ingreso        = fecha_ingreso,
+        )
+        db.session.add(usuario)
+
+    db.session.commit()
+    logger.info("✓ Filas de 'Usuarios sin ID' guardadas en Usuarios_Sin_ID.")
+
+def procesar_valida_usuarios(csv_bytes_io):
+    """
+    Stub para otra URL. Crea registros en la tabla que corresponda.
+    """
+    # idéntico al anterior, pero usando otro modelo
+    pass
+
+def procesar_detalle_apies(csv_bytes_io):
+    """
+    Stub para otra URL. Crea registros en la tabla que corresponda.
+    """
+    # idéntico al anterior, pero usando otro modelo
+    pass
+
+def procesar_ypf_2025_avance_cursada(csv_bytes_io):
+    """
+    Stub para otra URL. Crea registros en la tabla que corresponda.
+    """
+    # idéntico al anterior, pero usando otro modelo
+    pass
+
+def procesar_cursos_no_retail_2025(csv_bytes_io):
+    """
+    Stub para otra URL. Crea registros en la tabla que corresponda.
+    """
+    # idéntico al anterior, pero usando otro modelo
+    pass
+
+def procesar_cursos_retail_2025(csv_bytes_io):
+    """
+    Stub para otra URL. Crea registros en la tabla que corresponda.
+    """
+    # idéntico al anterior, pero usando otro modelo
+    pass
+
+def procesar_detalles_de_cursos(csv_bytes_io):
+    """
+    Stub para otra URL. Crea registros en la tabla que corresponda.
+    """
+    # idéntico al anterior, pero usando otro modelo
+    pass
+
+def procesar_encuestas_presenciales(csv_bytes_io):
+    """
+    Stub para otra URL. Crea registros en la tabla que corresponda.
+    """
+    # idéntico al anterior, pero usando otro modelo
+    pass
+
+def procesar_encuestas_ac(csv_bytes_io):
+    """
+    Stub para otra URL. Crea registros en la tabla que corresponda.
+    """
+    # idéntico al anterior, pero usando otro modelo
+    pass
+
+# mapeo de URLs a funciones
+SPECIAL_HANDLERS = {
+    "https://www.campuscomercialypf.com/totara/reportbuilder/report.php?id=133": procesar_usuarios_por_asignacion,
+    "https://www.campuscomercialypf.com/totara/reportbuilder/report.php?id=130": procesar_usuarios_sin_id,
+    "https://www.campuscomercialypf.com/totara/reportbuilder/report.php?id=330": procesar_valida_usuarios,
+    "https://www.campuscomercialypf.com/totara/reportbuilder/report.php?id=205": procesar_detalle_apies,
+    "https://www.campuscomercialypf.com/totara/reportbuilder/report.php?id=249": procesar_ypf_2025_avance_cursada,
+    "https://www.campuscomercialypf.com/totara/reportbuilder/report.php?id=296&sid=713 ": procesar_cursos_no_retail_2025,
+    "https://www.campuscomercialypf.com/totara/reportbuilder/report.php?id=302&sid=712": procesar_cursos_retail_2025,
+    "https://www.campuscomercialypf.com/totara/reportbuilder/report.php?id=248": procesar_detalles_de_cursos,
+    "https://repomatic2.onrender.com/recuperar_quinto_survey": procesar_encuestas_presenciales,
+    "https://repomatic2.onrender.com/recuperar_cuarto_survey": procesar_encuestas_ac
+
+}
+
+
 def exportar_y_guardar_reporte(session, sesskey, username, report_url):
     hora_inicio = datetime.now()
-    logger.info(f"6 - Recuperando reporte desde la URL. Hora de inicio: {hora_inicio.strftime('%d-%m-%Y %H:%M:%S')}")
+    logger.info(f"6 - Recuperando reporte desde la URL. Inicio: {hora_inicio:%d-%m-%Y %H:%M:%S}")
 
     export_payload = {
         "sesskey": sesskey,
@@ -184,124 +333,89 @@ def exportar_y_guardar_reporte(session, sesskey, username, report_url):
     }
 
     try:
-        # Captura el HTML del report_url
-        html_response = session.get(report_url)
-        html_response.raise_for_status()
-        html_content = html_response.text
-
-        # Pre fabrica variable "titulo" por si no lo encuentra
+        # 1) traigo el HTML y saco el título
+        html = session.get(report_url)
+        html.raise_for_status()
+        soup = BeautifulSoup(html.text, 'html.parser')
         titulo = "reporte_solicitado"
+        titulos_posibles = [r.title for r in TodosLosReportes.query.all()]
+        for h2 in soup.find_all('h2'):
+            for span in h2.find_all('span'):
+                txt = span.get_text(strip=True)
+                if txt in titulos_posibles:
+                    titulo = txt
+                    break
 
-        # Analiza el HTML con BeautifulSoup para buscar título en los <h2><span>...</span></h2>
-        soup = BeautifulSoup(html_content, 'html.parser')
-        h2_tags = soup.find_all('h2')
-        for h2_tag in h2_tags:
-            span_tags = h2_tag.find_all('span')
-            for span_tag in span_tags:
-                span_text = span_tag.get_text(strip=True)
-                if span_text:
-                    logger.info(f"7 - Texto encontrado en <span>: {span_text}")
-                    # Suponiendo que los títulos válidos vienen de TodosLosReportes
-                    titulos_posibles = [reporte.title for reporte in TodosLosReportes.query.all()]
-                    if span_text in titulos_posibles:
-                        titulo = span_text
-                        break
+        # 2) descargo el CSV crudo
+        logger.info("8 - Descargando CSV…")
+        resp = session.post(report_url, data=export_payload, headers=export_headers)
+        resp.raise_for_status()
+        csv_data = BytesIO(resp.content)
 
-        logger.info("8 - Comenzando la captura del archivo csv...")
-        export_response = session.post(report_url, data=export_payload, headers=export_headers)
-        export_response.raise_for_status()
-        logger.info(f"9 - La respuesta de la captura es: {export_response}")
-
-        # Convertimos el contenido a BytesIO
-        csv_data = BytesIO(export_response.content)
-
-        hora_descarga_finalizada = datetime.now()
-        elapsed_time = hora_descarga_finalizada - hora_inicio
-        elapsed_time_str = str(elapsed_time)
-        logger.info(f"10 - CSV recuperado. Tiempo transcurrido de descarga: {elapsed_time}")
-
-        # Si el reporte es 'Inscripciones Marketplace', se divide el campo APIES según la lógica
+        # 3) lógica de “Inscripciones Marketplace” (split de APIES)
         if titulo == "Inscripciones Marketplace":
-            import csv
-            import re
-            from io import StringIO
-
-            logger.info("Detectado 'Inscripciones Marketplace'; se procederá a dividir registros con múltiples APIES.")
-            csv_data.seek(0)
-            decoded_csv = csv_data.read().decode('utf-8', errors='replace')
-            lines = decoded_csv.splitlines()
-
-            reader = csv.DictReader(lines)
-            fieldnames = reader.fieldnames
-            filas_procesadas = []
-
+            logger.info("→ Split de APIES en Inscripciones Marketplace…")
+            decoded = csv_data.getvalue().decode('utf-8', errors='replace')
+            rows = decoded.splitlines()
+            reader = csv.DictReader(rows)
+            processed = []
             for row in reader:
-                apies_str = row.get('APIES', '')
-                apies_str = re.sub(r'[–—−]', '-', apies_str)
-                apies_str = re.sub(r'[\u200B\u200C\u200D\uFEFF]', '', apies_str)
-                apies_list = [apie.strip() for apie in apies_str.split('-')]
-                apies_unicos = list(dict.fromkeys(apies_list))
-
-                if len(apies_unicos) > 1:
-                    for api_value in apies_unicos:
-                        nueva_fila = dict(row)
-                        nueva_fila['APIES'] = api_value
-                        filas_procesadas.append(nueva_fila)
+                apies = re.sub(r'[–—−]', '-', row.get('APIES',''))
+                apies = re.sub(r'[\u200B\u200C\u200D\uFEFF]', '', apies)
+                uniques = list(dict.fromkeys([a.strip() for a in apies.split('-') if a.strip()]))
+                if len(uniques) > 1:
+                    for u in uniques:
+                        newr = dict(row); newr['APIES'] = u; processed.append(newr)
                 else:
-                    if len(apies_unicos) == 1:
-                        row['APIES'] = apies_unicos[0]
-                    else:
-                        row['APIES'] = ''
-                    filas_procesadas.append(row)
+                    row['APIES'] = uniques[0] if uniques else ''
+                    processed.append(row)
+            output = BytesIO()
+            writer = csv.DictWriter(output, fieldnames=reader.fieldnames)
+            writer.writeheader(); writer.writerows(processed)
+            csv_data = BytesIO(output.getvalue())
+            logger.info("→ Split de APIES finalizado.")
 
-            output = StringIO()
-            writer = csv.DictWriter(output, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(filas_procesadas)
-            csv_data = BytesIO(output.getvalue().encode('utf-8'))
-            logger.info("Operación de división de APIES completada para 'Inscripciones Marketplace'.")
+        # 4) si la URL es “especial”, llamo al handler antes del base64
+        if report_url in SPECIAL_HANDLERS:
+            logger.info(f"→ URL especial detectada ({report_url}), llamando handler…")
+            handler = SPECIAL_HANDLERS[report_url]
+            handler(csv_data)            # guarda fila a fila en su tabla
+            csv_data.seek(0)             # vuelvo al inicio para el base64
 
-        size_megabytes = len(csv_data.getvalue()) / 1_048_576
-        logger.info("11 - Controlando cantidad de reportes previos en la DB para mantener sólo los últimos 7...")
-
-        if report_url in [
+        # 5) controlo cantidad de reportes viejos y los borro manteniendo N
+        size_mb = len(csv_data.getvalue()) / 1_048_576
+        max_r = 30 if report_url in [
             "https://www.campuscomercialypf.com/totara/reportbuilder/report.php?id=133",
             "https://www.campuscomercialypf.com/totara/reportbuilder/report.php?id=306"
-        ]:
-            max_reports = 30
-        else:
-            max_reports = 7
+        ] else 7
+        existing = Reporte.query.filter_by(report_url=report_url).order_by(Reporte.created_at.asc()).all()
+        while len(existing) >= max_r:
+            db.session.delete(existing[0])
+            db.session.commit()
+            existing = Reporte.query.filter_by(report_url=report_url).order_by(Reporte.created_at.asc()).all()
+            logger.info("→ Eliminé reporte viejo para mantener sólo los últimos.")
 
-        # Se consulta la cantidad de reportes existentes para esa URL, ordenados por fecha de creación ascendente (el más viejo primero)
-        existing_reports = Reporte.query.filter_by(report_url=report_url).order_by(Reporte.created_at.asc()).all()
-        # Si hay 7 o más, se elimina el/los más viejo(s) hasta dejar espacio para el nuevo
-        while len(existing_reports) >= max_reports:
-            oldest_report = existing_reports[0]
-            db.session.delete(oldest_report)
-            db.session.commit()  # Commit inmediato para que la lista se actualice
-            logger.info("Reporte más antiguo eliminado para mantener solo los últimos 7 registros.")
-            existing_reports = Reporte.query.filter_by(report_url=report_url).order_by(Reporte.created_at.asc()).all()
-
-        # Guardamos el nuevo reporte
-        report = Reporte(
-            user_id=username,
-            report_url=report_url,
-            data=csv_data.read(),
-            size=size_megabytes,
-            elapsed_time=elapsed_time_str,
-            title=titulo
+        # 6) guardo el reporte completo en base64 como antes
+        nuevo = Reporte(
+            user_id      = username,
+            report_url   = report_url,
+            data         = csv_data.read(),
+            size         = size_mb,
+            elapsed_time = str(datetime.now() - hora_inicio),
+            title        = titulo
         )
-        db.session.add(report)
+        db.session.add(nuevo)
         db.session.commit()
-        logger.info("13 - Reporte nuevo guardado en la base de datos. Fin de la ejecución.")
+        logger.info("13 - Reporte guardado en Reporte (base64).")
         return
 
     except requests.RequestException as e:
-        logger.info(f"Error en la recuperación del reporte desde el campus. El siguiente error se recuperó: {e}")
+        logger.error(f"Error HTTP al recuperar reporte: {e}")
     except SQLAlchemyError as e:
-        logger.info(f"Error en la base de datos: {e}")
+        logger.error(f"Error BD: {e}")
     except Exception as e:
-        logger.info(f"Error inesperado: {e}")
+        logger.error(f"Error inesperado: {e}")
+
 
 
 def obtener_reporte(reporte_url):
