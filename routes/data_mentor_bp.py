@@ -10,7 +10,7 @@ from utils.data_mentor_utils import query_assistant_mentor
 import urllib.request
 import urllib.error
 import json
-from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID
+from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas
 
 
 
@@ -108,7 +108,37 @@ def horas_por_curso():
     ]
     return jsonify(data)
 
+# -------------------------- Contabilizar longitud de cualquier tabla ----------------------------------
 
+# Diccionario para mapear nombres de string a clases reales
+MODELS = {
+    'Usuarios_Por_Asignacion': Usuarios_Por_Asignacion,
+    'Usuarios_Sin_ID': Usuarios_Sin_ID,
+    'ValidaUsuarios': ValidaUsuarios,
+    'DetalleApies' : DetalleApies,
+    'AvanceCursada': AvanceCursada,
+    'DetallesDeCursos' : DetallesDeCursos,
+    'CursadasAgrupadas' : CursadasAgrupadas
+    # Agregá los modelos que quieras habilitar acá
+}
+
+@data_mentor_bp.route('/contar-registros', methods=['POST'])
+def contar_registros():
+    data = request.get_json()
+    nombre_tabla = data.get('tabla')
+
+    if not nombre_tabla:
+        return jsonify({"error": "Falta el nombre de la tabla"}), 400
+
+    modelo = MODELS.get(nombre_tabla)
+    if not modelo:
+        return jsonify({"error": f"La tabla '{nombre_tabla}' no está habilitada o no existe"}), 404
+
+    try:
+        cantidad = db.session.query(modelo).count()
+        return jsonify({"tabla": nombre_tabla, "cantidad_registros": cantidad}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # -------------------------- ACA VIENEN LAS RUTAS DE LAS TABLAS DE REPORTES ----------------------------
 

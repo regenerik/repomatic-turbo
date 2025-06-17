@@ -5,7 +5,7 @@ import re
 import pandas as pd
 from io import BytesIO
 from database import db
-from models import Reporte, TodosLosReportes, Usuarios_Sin_ID
+from models import Reporte, TodosLosReportes, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas, QuintoSurveySql
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -183,6 +183,10 @@ def procesar_usuarios_por_asignacion(csv_bytes_io):
     lines = decoded.splitlines()
     reader = csv.DictReader(lines)
     from models import Usuarios_Por_Asignacion  # tu modelo SQLAlchemy
+
+    db.session.query(Usuarios_Por_Asignacion).delete() # Como no es acumulativo borramos todo antes de guardar lo nuevo
+
+
     for row in reader:
         fecha_str = row.get('fecha_suspension', '').strip()
         if fecha_str:
@@ -226,6 +230,8 @@ def procesar_usuarios_sin_id(csv_bytes_io):
         logger.debug(f"parse_date: no pude convertir '{v}', lo dejo None")
         return None
 
+
+    db.session.query(Usuarios_Sin_ID).delete() 
     for row in reader:
         ultimo_login  = parse_date(row.get('Último inicio de sesión del usuario', ''))
         ultimo_acceso = parse_date(row.get('Último Acceso', ''))
@@ -246,53 +252,245 @@ def procesar_usuarios_sin_id(csv_bytes_io):
     logger.info("✓ Filas de 'Usuarios sin ID' guardadas en Usuarios_Sin_ID.")
 
 def procesar_valida_usuarios(csv_bytes_io):
-    """
-    Stub para otra URL. Crea registros en la tabla que corresponda.
-    """
-    # idéntico al anterior, pero usando otro modelo
-    pass
+    csv_bytes_io.seek(0)
+    decoded = csv_bytes_io.read().decode('utf-8', errors='replace')
+    lines = decoded.splitlines()
+    reader = csv.DictReader(lines)
+
+    def parse_date(val):
+        v = val.strip()
+        if not v:
+            return None
+        for fmt in ('%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y'):
+            try:
+                return datetime.strptime(v, fmt)
+            except ValueError:
+                continue
+        logger.debug(f"parse_date: no pude convertir '{v}', lo dejo None")
+        return None
+
+    # Limpiar la tabla antes de guardar los nuevos registros
+    db.session.query(ValidaUsuarios).delete()
+
+    for row in reader:
+        fecha_nac = parse_date(row.get('Fecha de Nacimiento', ''))
+
+        usuario = ValidaUsuarios(
+            nombre_completo     = row.get('Nombre completo', '').strip(),
+            ciudad              = row.get('Ciudad', '').strip(),
+            nivel_estudios      = row.get('Nivel de estudios', '').strip(),
+            fecha_nacimiento    = fecha_nac,
+            traslado_moto       = row.get('Me traslado en Moto', '').strip(),
+            traslado_bicicleta  = row.get('Me traslado en Bicicleta', '').strip(),
+            anio_ingreso        = row.get('Año de ingreso a la compañía', '').strip(),
+            socio_serviclub     = row.get('Socio ServiClub', '').strip(),
+            estatus_usuario     = row.get('Estatus del Usuario', '').strip(),
+            dni                 = row.get('DNI', '').strip(),
+        )
+        db.session.add(usuario)
+
+    db.session.commit()
+    logger.info("✓ Filas de 'ValidaUsuarios' cargadas con éxito.")
 
 def procesar_detalle_apies(csv_bytes_io):
-    """
-    Stub para otra URL. Crea registros en la tabla que corresponda.
-    """
-    # idéntico al anterior, pero usando otro modelo
-    pass
+    csv_bytes_io.seek(0)
+    decoded = csv_bytes_io.read().decode('utf-8', errors='replace')
+    lines = decoded.splitlines()
+    reader = csv.DictReader(lines)
+
+    # Limpiar la tabla antes de guardar los nuevos registros
+    db.session.query(DetalleApies).delete()
+
+    for row in reader:
+        detalle = DetalleApies(
+            apies               = row.get('APIES', '').strip(),
+            apies_razon_social  = row.get('APIES Rz Social', '').strip(),
+            cuadro              = row.get('Cuadro', '').strip(),
+            numero_id_padre     = row.get('Numero ID del Padre', '').strip(),
+            red                 = row.get('RED', '').strip(),
+            region              = row.get('Region', '').strip(),
+            segmento            = row.get('Segmento', '').strip(),
+            zona                = row.get('Zona', '').strip(),
+        )
+        db.session.add(detalle)
+
+    db.session.commit()
+    logger.info("✓ Filas de 'DetalleApies' cargadas correctamente.")
 
 def procesar_ypf_2025_avance_cursada(csv_bytes_io):
-    """
-    Stub para otra URL. Crea registros en la tabla que corresponda.
-    """
-    # idéntico al anterior, pero usando otro modelo
-    pass
+    csv_bytes_io.seek(0)
+    decoded = csv_bytes_io.read().decode('utf-8', errors='replace')
+    lines = decoded.splitlines()
+    reader = csv.DictReader(lines)
 
-def procesar_cursos_no_retail_2025(csv_bytes_io):
-    """
-    Stub para otra URL. Crea registros en la tabla que corresponda.
-    """
-    # idéntico al anterior, pero usando otro modelo
-    pass
+    def parse_date(val):
+        v = val.strip()
+        if not v:
+            return None
+        for fmt in ('%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y'):
+            try:
+                return datetime.strptime(v, fmt)
+            except ValueError:
+                continue
+        logger.debug(f"parse_date: no pude convertir '{v}', lo dejo None")
+        return None
 
-def procesar_cursos_retail_2025(csv_bytes_io):
-    """
-    Stub para otra URL. Crea registros en la tabla que corresponda.
-    """
-    # idéntico al anterior, pero usando otro modelo
-    pass
+    # Limpiar la tabla antes de insertar nuevos datos
+    db.session.query(AvanceCursada).delete()
+
+    for row in reader:
+        fecha_fin = parse_date(row.get('Fecha de Fin del curso', ''))
+
+        curso = AvanceCursada(
+            apies                   = row.get('APIES', '').strip(),
+            apies_razon_social      = row.get('APIES RzSocial', '').strip(),
+            dni                     = row.get('DNI', '').strip(),
+            nombre_completo_usuario = row.get('Nombre completo del usuario', '').strip(),
+            rol_funcion             = row.get('Rol/Funcion', '').strip(),
+            estatus_usuario         = row.get('Estatus del Usuario', '').strip(),
+            nombre_programa         = row.get('Nombre del programa', '').strip(),
+            nombre_corto_curso      = row.get('Nombre Corto del Curso', '').strip(),
+            estatus_curso           = row.get('Estatus del Curso', '').strip(),
+            fecha_fin_curso         = fecha_fin,
+        )
+        db.session.add(curso)
+
+    db.session.commit()
+    logger.info("✓ Filas de 'AvanceCursada' cargadas correctamente.")
+
+def procesar_cursos_agrupados(csv_bytes_io):
+    csv_bytes_io.seek(0)
+    decoded = csv_bytes_io.read().decode('utf-8', errors='replace')
+    lines = decoded.splitlines()
+    reader = csv.DictReader(lines)
+
+    nuevos_registros = 0
+    saltados = 0
+
+    # Traemos todos los id_concat existentes de la tabla
+    existentes = set(
+        r[0] for r in db.session.query(CursadasAgrupadas.id_concat).all()
+    )
+
+    for row in reader:
+        dni = row.get('DNI', '').strip()
+        id_curso = row.get('ID Curso', '').strip()
+        estatus = row.get('Estatus de finalización', '').strip()
+        fecha = row.get('La fecha de finalización', '').strip()
+        id_concat = f"{dni}{id_curso}"
+
+        if id_concat in existentes:
+            logger.debug(f"Registro ya existe, salteado: {id_concat}")
+            saltados += 1
+            continue
+
+        nuevo = CursadasAgrupadas(
+            dni=dni,
+            id_curso=id_curso,
+            estatus_finalizacion=estatus,
+            fecha_finalizacion=fecha,
+            id_concat=id_concat
+        )
+        db.session.add(nuevo)
+        existentes.add(id_concat)
+        nuevos_registros += 1
+
+    db.session.commit()
+    logger.info(f"✓ Se guardaron {nuevos_registros} registros nuevos. {saltados} ya existían y fueron ignorados.")
 
 def procesar_detalles_de_cursos(csv_bytes_io):
-    """
-    Stub para otra URL. Crea registros en la tabla que corresponda.
-    """
-    # idéntico al anterior, pero usando otro modelo
-    pass
+    csv_bytes_io.seek(0)
+    decoded = csv_bytes_io.read().decode('utf-8', errors='replace')
+    lines = decoded.splitlines()
+    reader = csv.DictReader(lines)
+
+    def parse_date(val):
+        v = val.strip()
+        if not v:
+            return None
+        for fmt in ('%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y'):
+            try:
+                return datetime.strptime(v, fmt)
+            except ValueError:
+                continue
+        logger.debug(f"parse_date: no pude convertir '{v}', lo dejo None")
+        return None
+
+    db.session.query(DetallesDeCursos).delete()
+
+    for row in reader:
+        fecha_creacion = parse_date(row.get('Fecha de Creacion', ''))
+
+        curso = DetallesDeCursos(
+            nombre_curso        = row.get('Nombre del Curso', '').strip(),
+            id_curso            = row.get('ID del Curso', '').strip(),
+            negocio_solicitante = row.get('Negocio que solicita', '').strip(),
+            horas_formacion     = row.get('Horas de Formacion', '').strip(),
+            modalidad           = row.get('Modalidad', '').strip(),
+            resumen_curso       = row.get('Resumen del Curso', '').strip(),
+            fecha_creacion      = fecha_creacion,
+            visible_oculto      = row.get('Curso Visible/Oculto', '').strip(),
+            capacidad_marco     = row.get('Capacidad marco', '').strip(),
+            tematica            = row.get('Temática', '').strip(),
+            impacto_negocio     = row.get('Impacto en negocio', '').strip(),
+            impacto_segmento    = row.get('Impacto en segmento', '').strip(),
+        )
+        db.session.add(curso)
+
+    db.session.commit()
+    logger.info("✓ Filas de 'DetallesDeCursos' cargadas correctamente.")
 
 def procesar_encuestas_presenciales(csv_bytes_io):
-    """
-    Stub para otra URL. Crea registros en la tabla que corresponda.
-    """
-    # idéntico al anterior, pero usando otro modelo
-    pass
+    csv_bytes_io.seek(0)
+    decoded = csv_bytes_io.read().decode('utf-8', errors='replace')
+    reader = csv.DictReader(decoded.splitlines())
+
+    # traemos todos los id_concat existentes
+    existentes = {row[0] for row in db.session.query(QuintoSurveySql.id_concat).all()}
+
+    nuevos, saltados = 0, 0
+
+    def parse_date(v):
+        v = v.strip()
+        if not v: return None
+        for fmt in ('%Y-%m-%d','%d/%m/%Y','%m/%d/%Y'):
+            try: return datetime.strptime(v, fmt)
+            except: pass
+        logger.debug(f"no pude parsear fecha '{v}'")
+        return None
+
+    for row in reader:
+        dc = row.get('date_created','').strip()
+        dm = row.get('date_modified','').strip()
+        ga = row.get('GestoresAprendizaje','').strip()
+        key = f"{dc}{dm}{ga}"
+        if key in existentes:
+            saltados += 1
+            continue
+
+        record = QuintoSurveySql(
+            id_concat             = key,
+            date_created          = parse_date(dc),
+            gestores_aprendizaje  = ga,
+            curso                 = row.get('Curso','').strip(),
+            recomendacion_colega  = row.get('¿Qué tan probable es que usted le recomiende este curso a un colega?','').strip(),
+            desempeno_instructor  = row.get('De acuerdo a tu experiencia del día de hoy, ¿Cómo calificarías el desempeño del instructor?','').strip(),
+            calificacion_general  = row.get('En líneas generales, ¿cómo calificarías a este curso/ actividad?','').strip(),
+            duracion_curso        = row.get('Pensando en los contenidos vistos, considerás que la duración del curso fue:','').strip(),
+            info_recibida         = row.get('En cuanto a la información recibida, considerás que es:','').strip(),
+            claridad_temas        = row.get('Los temas fueron tratados con claridad','').strip(),
+            utilidad_contenido    = row.get('El contenido visto es de utilidad para mi tarea','').strip(),
+            ayudas_practica       = row.get('Las explicaciones, guías, videos, etc. ayudan a poner en práctica lo visto en el curso','').strip(),
+            actividades_refuerzo  = row.get('Las actividades propuestas refuerzan lo aprendido','').strip(),
+            experiencia_aprendizaje = row.get('En líneas generales dirías que tu experiencia de aprendizaje con este curso fue:','').strip(),
+            sugerencias           = row.get('Para finalizar dejamos este espacio para que nos dejes tus sugerencias o comentarios relacionados a este curso','').strip()
+        )
+        db.session.add(record)
+        existentes.add(key)
+        nuevos += 1
+
+    db.session.commit()
+    logger.info(f"✓ Guardé {nuevos} nuevos y salté {saltados} duplicados.")
 
 def procesar_encuestas_ac(csv_bytes_io):
     """
@@ -308,8 +506,8 @@ SPECIAL_HANDLERS = {
     "https://www.campuscomercialypf.com/totara/reportbuilder/report.php?id=330": procesar_valida_usuarios,
     "https://www.campuscomercialypf.com/totara/reportbuilder/report.php?id=205": procesar_detalle_apies,
     "https://www.campuscomercialypf.com/totara/reportbuilder/report.php?id=249": procesar_ypf_2025_avance_cursada,
-    "https://www.campuscomercialypf.com/totara/reportbuilder/report.php?id=296&sid=713 ": procesar_cursos_no_retail_2025,
-    "https://www.campuscomercialypf.com/totara/reportbuilder/report.php?id=302&sid=712": procesar_cursos_retail_2025,
+    "https://www.campuscomercialypf.com/totara/reportbuilder/report.php?id=296&sid=713": procesar_cursos_agrupados,
+    "https://www.campuscomercialypf.com/totara/reportbuilder/report.php?id=302&sid=712": procesar_cursos_agrupados,
     "https://www.campuscomercialypf.com/totara/reportbuilder/report.php?id=248": procesar_detalles_de_cursos,
     "https://repomatic2.onrender.com/recuperar_quinto_survey": procesar_encuestas_presenciales,
     "https://repomatic2.onrender.com/recuperar_cuarto_survey": procesar_encuestas_ac

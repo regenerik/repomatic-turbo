@@ -226,6 +226,24 @@ def obtener_y_guardar_quinto_survey():
             df = df[existing]
             logger.info("🔢 Columnas ordenadas según schema final")
 
+            import io
+            from utils.rescate_utils import procesar_encuestas_presenciales
+
+            # --- INTERCEPCIÓN PARA procesar_encuestas_presenciales ---
+            logger.info("🔌 Envío del DataFrame a procesar_encuestas_presenciales")
+
+            # Convertimos el df a CSV en un BytesIO
+            csv_buffer = io.BytesIO()
+            # Index=False para no incluir la columna de índice en el CSV
+            csv_buffer.write(df.to_csv(index=False).encode('utf-8'))
+            csv_buffer.seek(0)
+
+            # Llamamos a tu función que procesa encuestas presenciales
+            procesar_encuestas_presenciales(csv_buffer)
+
+            logger.info("✅ procesar_encuestas_presenciales terminó correctamente")
+            # --- FIN DE LA INTERCEPCIÓN ------------------------------
+
             logger.info("💾 Serializando DataFrame a binario pickle")
             binary = pickle.dumps(df)
 
