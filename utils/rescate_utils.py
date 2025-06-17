@@ -5,7 +5,7 @@ import re
 import pandas as pd
 from io import BytesIO
 from database import db
-from models import Reporte, TodosLosReportes, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas, QuintoSurveySql
+from models import Reporte, TodosLosReportes, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas, QuintoSurveySql, CuartoSurveySql
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -493,11 +493,50 @@ def procesar_encuestas_presenciales(csv_bytes_io):
     logger.info(f"✓ Guardé {nuevos} nuevos y salté {saltados} duplicados.")
 
 def procesar_encuestas_ac(csv_bytes_io):
-    """
-    Stub para otra URL. Crea registros en la tabla que corresponda.
-    """
-    # idéntico al anterior, pero usando otro modelo
-    pass
+    csv_bytes_io.seek(0)
+    decoded = csv_bytes_io.read().decode('utf-8', errors='replace')
+    reader = csv.DictReader(decoded.splitlines())
+
+    # Traemos todos los id_concat ya existentes
+    existentes = {row[0] for row in db.session.query(CuartoSurveySql.id_concat).all()}
+
+    nuevos, saltados = 0, 0
+
+    def parse_date(v):
+        v = v.strip()
+        if not v: return ''
+        return v  # si no lo parseás a DateTime, lo dejamos string
+
+    for row in reader:
+        dm = row.get('date_modified', '').strip()
+        ip = row.get('ip_address', '').strip()
+        key = f"{dm}{ip}"
+        if key in existentes:
+            saltados += 1
+            continue
+
+        reg = CuartoSurveySql(
+            id_code                 = row.get('ID_CODE','').strip(),
+            id_concat               = key,
+            recomendacion_colega    = row.get('¿Qué tan probable es que usted le recomiende este curso a un colega?','').strip(),
+            calificacion_general    = row.get('En líneas generales, ¿cómo calificarías a este curso/ actividad?','').strip(),
+            duracion_curso          = row.get('Pensando en los contenidos vistos, considerás que la duración del curso fue:','').strip(),
+            info_recibida           = row.get('En cuanto a la información recibida, considerás que es:','').strip(),
+            claridad_temas          = row.get('Los temas fueron tratados con claridad','').strip(),
+            utilidad_contenido      = row.get('El contenido visto es de utilidad para mi tarea','').strip(),
+            ayudas_practica         = row.get('Las explicaciones, guías, videos, etc. ayudan a poner en práctica lo visto en el curso','').strip(),
+            actividades_refuerzo    = row.get('Las actividades propuestas refuerzan lo aprendido','').strip(),
+            problema_campus         = row.get('Al momento de realizar el curso, ¿tuviste algún problema con el Campus de aprendizaje?','').strip(),
+            detalle_problema        = row.get('Si tuviste algún problema, por favor, contanos que sucedió','').strip(),
+            experiencia_aprendizaje = row.get('En líneas generales dirías que tu experiencia de aprendizaje con este curso fue:','').strip(),
+            sugerencias             = row.get('Para finalizar dejamos este espacio para que nos dejes tus sugerencias o comentarios relacionados a este curso','').strip(),
+        )
+        db.session.add(reg)
+        existentes.add(key)
+        nuevos += 1
+
+    db.session.commit()
+    logger.info(f"✓ procesar_encuestas_ac: {nuevos} nuevos, {saltados} duplicados salteados.")
 
 # mapeo de URLs a funciones
 SPECIAL_HANDLERS = {

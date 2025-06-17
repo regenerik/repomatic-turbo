@@ -477,6 +477,19 @@ def obtener_y_guardar_cuarto_survey():
     # 4) Crear DataFrame y guardar en DB
     print('[4] Creando DataFrame y guardando en DB')
     df = pd.DataFrame.from_records(records, columns=cols)
+
+    # ————— Aquí metés tu llamada —————
+    import io
+    from utils.rescate_utils import procesar_encuestas_ac
+
+    # Convertimos el df a CSV en un BytesIO y lo pasamos a procesar_encuestas_ac
+    csv_buffer = io.BytesIO()
+    csv_buffer.write(df.to_csv(index=False).encode('utf-8'))
+    csv_buffer.seek(0)
+    procesar_encuestas_ac(csv_buffer)
+    logger.info("🔌 procesar_encuestas_ac terminó correctamente")
+    # ————————————————————————————
+
     with BytesIO() as buf:
         df.to_pickle(buf)
         blob = buf.getvalue()

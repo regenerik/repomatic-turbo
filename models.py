@@ -418,3 +418,65 @@ class QuintoSurveySql(db.Model):
 
     def __repr__(self):
         return f"<QuintoSurveySql(id_concat={self.id_concat}, curso={self.curso})>"
+    
+class CuartoSurveySql(db.Model):
+    __tablename__ = 'cuarto_survey_sql'
+
+    id         = db.Column(db.Integer, primary_key=True)
+    id_code    = db.Column('ID_CODE', db.String(255), nullable=True)  # si lo querés seguir guardando
+    id_concat  = db.Column(db.String(512), unique=True, nullable=False)  # date_modified + ip_address
+
+    # tus campos de encuesta...
+    recomendacion_colega    = db.Column(
+        '¿Qué tan probable es que usted le recomiende este curso a un colega?',
+        db.String(255), nullable=True, default=""
+    )
+    calificacion_general    = db.Column(
+        'En líneas generales, ¿cómo calificarías a este curso/ actividad?',
+        db.String(255), nullable=True, default=""
+    )
+    duracion_curso          = db.Column(
+        'Pensando en los contenidos vistos, considerás que la duración del curso fue:',
+        db.String(255), nullable=True, default=""
+    )
+    info_recibida           = db.Column(
+        'En cuanto a la información recibida, considerás que es:',
+        db.String(255), nullable=True, default=""
+    )
+    claridad_temas          = db.Column(
+        'Los temas fueron tratados con claridad',
+        db.String(255), nullable=True, default=""
+    )
+    utilidad_contenido      = db.Column(
+        'El contenido visto es de utilidad para mi tarea',
+        db.String(255), nullable=True, default=""
+    )
+    ayudas_practica         = db.Column(
+        'Las explicaciones, guías, videos, etc. ayudan a poner en práctica lo visto en el curso',
+        db.String(255), nullable=True, default=""
+    )
+    actividades_refuerzo    = db.Column(
+        'Las actividades propuestas refuerzan lo aprendido',
+        db.String(255), nullable=True, default=""
+    )
+    problema_campus         = db.Column(
+        'Al momento de realizar el curso, ¿tuviste algún problema con el Campus de aprendizaje?',
+        db.String(255), nullable=True, default=""
+    )
+    detalle_problema        = db.Column(
+        'Si tuviste algún problema, por favor, contanos que sucedió',
+        db.Text, nullable=True, default=""
+    )
+    experiencia_aprendizaje = db.Column(
+        'En líneas generales dirías que tu experiencia de aprendizaje con este curso fue:',
+        db.String(255), nullable=True, default=""
+    )
+    sugerencias             = db.Column(
+        'Para finalizar dejamos este espacio para que nos dejes tus sugerencias o comentarios relacionados a este curso',
+        db.Text, nullable=True, default=""
+    )
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<CuartoSurveySql(id_concat={self.id_concat})>"
