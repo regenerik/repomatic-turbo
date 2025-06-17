@@ -10,7 +10,7 @@ from utils.data_mentor_utils import query_assistant_mentor
 import urllib.request
 import urllib.error
 import json
-from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas
+from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas,FormularioGestor,CuartoSurveySql, QuintoSurveySql
 
 
 
@@ -118,7 +118,10 @@ MODELS = {
     'DetalleApies' : DetalleApies,
     'AvanceCursada': AvanceCursada,
     'DetallesDeCursos' : DetallesDeCursos,
-    'CursadasAgrupadas' : CursadasAgrupadas
+    'CursadasAgrupadas' : CursadasAgrupadas,
+    'FormularioGestor' :FormularioGestor,
+    'CuartoSurveySql': CuartoSurveySql,
+    'QuintoSurveySql' : QuintoSurveySql
     # Agregá los modelos que quieras habilitar acá
 }
 
