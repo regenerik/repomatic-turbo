@@ -2,7 +2,7 @@ from openai import OpenAI
 import requests
 import pandas as pd
 from database import db
-from models import SegundoSurvey
+from models import QuintoSurvey
 import time
 import pickle
 import pytz
@@ -248,7 +248,7 @@ def obtener_y_guardar_quinto_survey():
             binary = pickle.dumps(df)
 
             logger.info("🗄️ Guardando registro en la base de datos")
-            record = SegundoSurvey(data=binary)
+            record = QuintoSurvey(data=binary)
             db.session.add(record)
             db.session.commit()
             logger.info("✅ Registro guardado con id %s", record.id)
