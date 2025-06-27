@@ -492,3 +492,34 @@ class CuartoSurveySql(db.Model):
 
     def __repr__(self):
         return f"<CuartoSurveySql(id_concat={self.id_concat})>"
+    
+
+# TABLAS EXPERIENCIA DE CLIENTE
+
+class Comentarios2023(db.Model):
+    __tablename__ = 'comentarios_encuesta'
+
+    id = db.Column(db.Integer, primary_key=True)
+    fecha = db.Column(db.DateTime, nullable=True)
+    apies = db.Column(db.String(255), nullable=True, default="")
+    comentario = db.Column(db.Text, nullable=True, default="")
+    canal = db.Column(db.String(255), nullable=True, default="")
+    topico = db.Column(db.String(255), nullable=True, default="")
+    sentiment = db.Column(db.String(50), nullable=True, default="")
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def serialize(self):
+        return {
+            'id': self.id,
+            'fecha': self.fecha.isoformat() if self.fecha else None,
+            'apies': self.apies,
+            'comentario': self.comentario,
+            'canal': self.canal,
+            'topico': self.topico,
+            'sentiment': self.sentiment,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
+
+    def __repr__(self):
+        return f"<ComentarioEncuesta id={self.id} apies={self.apies}>"

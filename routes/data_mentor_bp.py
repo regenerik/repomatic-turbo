@@ -10,7 +10,8 @@ from utils.data_mentor_utils import query_assistant_mentor
 import urllib.request
 import urllib.error
 import json
-from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas,FormularioGestor,CuartoSurveySql, QuintoSurveySql
+import pandas as pd
+from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas,FormularioGestor,CuartoSurveySql, QuintoSurveySql, Comentarios2023
 
 
 
@@ -108,7 +109,7 @@ def horas_por_curso():
     ]
     return jsonify(data)
 
-# -------------------------- Contabilizar longitud de cualquier tabla ----------------------------------
+# -------------------------- MODELOS QUE SE TIENEN EN CUENTA PARA CONTABILIZAR SUS REGISTROS ----------------------------------
 
 # Diccionario para mapear nombres de string a clases reales
 MODELS = {
@@ -121,9 +122,12 @@ MODELS = {
     'CursadasAgrupadas' : CursadasAgrupadas,
     'FormularioGestor' :FormularioGestor,
     'CuartoSurveySql': CuartoSurveySql,
-    'QuintoSurveySql' : QuintoSurveySql
+    'QuintoSurveySql' : QuintoSurveySql,
+    'Comentarios2023': Comentarios2023
     # Agregá los modelos que quieras habilitar acá
 }
+
+# -------------------------- Contabilizar longitud de cualquier tabla ----------------------------------
 
 @data_mentor_bp.route('/contar-registros', methods=['POST'])
 def contar_registros():
@@ -144,9 +148,6 @@ def contar_registros():
         return jsonify({"error": str(e)}), 500
 
 # -------------------------- ACA VIENEN LAS RUTAS DE LAS TABLAS DE REPORTES ----------------------------
-
-
-
 
 
 @data_mentor_bp.route('/usuarios_por_asignacion/<int:registro_id>', methods=['GET'])
@@ -186,3 +187,47 @@ def get_usuario_sin_id(registro_id):
 
     logger.info(f"Registro encontrado: {registro}")
     return jsonify(registro.serialize()), 200
+
+
+
+
+# RUTAS PARA CARGAR TABLAS DE EXPERIENCIA 2023 24 y 25
+
+@data_mentor_bp.route('/cargar_comentarios_2023', methods=['POST'])
+def cargar_comentarios_encuesta():
+    """
+    Recibe un archivo .xlsx vía form-data (campo: 'file') y guarda sus registros en la DB
+    """
+    archivo = request.files.get('file')
+    if not archivo:
+        return jsonify({'error': 'No se envió ningún archivo', 'status': 400}), 400
+
+    try:
+        df = pd.read_excel(archivo)
+
+        registros = []
+        for _, fila in df.iterrows():
+            fecha_raw = fila.get('FECHA')
+            try:
+                fecha = pd.to_datetime(fecha_raw) if pd.notnull(fecha_raw) else None
+            except:
+                fecha = None
+
+            nuevo = Comentarios2023(
+                fecha=fecha,
+                apies=str(fila.get('APIES', '')).strip(),
+                comentario=str(fila.get('COMENTARIO', '')).strip(),
+                canal=str(fila.get('CANAL', '')).strip(),
+                topico=str(fila.get('TÓPICO', '')).strip(),
+                sentiment=str(fila.get('SENTIMENT', '')).strip()
+            )
+            registros.append(nuevo)
+
+        db.session.add_all(registros)
+        db.session.commit()
+
+        return jsonify({'mensaje': f'Se guardaron {len(registros)} comentarios', 'status': 200}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': f'Error al procesar el archivo: {str(e)}', 'status': 500}), 500
