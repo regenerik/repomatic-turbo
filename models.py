@@ -77,8 +77,33 @@ class DailyCommentsWithEvaluation(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     archivo_binario = db.Column(db.LargeBinary)
 
+# TABLAS PARA GUARDAR NECESIDADES>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
+class TopicoNecesidad(db.Model):
+    __tablename__ = 'topico_necesidad'
+    id = db.Column(db.Integer, primary_key=True)
+    nombre_topico = db.Column(db.String(255), unique=True, nullable=False)
 
+class ComentarioNecesidad(db.Model):
+    __tablename__ = 'comentario_necesidad'
+    id = db.Column(db.Integer, primary_key=True)
+    id_unico = db.Column(db.String(255), unique=True, nullable=False)
+    fecha = db.Column(db.Date, nullable=False)
+    api_es = db.Column(db.Integer, nullable=False)
+    comentario = db.Column(db.Text, nullable=False)
+    canal = db.Column(db.String(50), nullable=False)
+    sentimiento = db.Column(db.String(50), nullable=False)
+    topico = db.Column(db.String(255), nullable=True)
+    topico_necesidad_id = db.Column(db.Integer, db.ForeignKey('topico_necesidad.id'))
+    topico_rel = db.relationship('TopicoNecesidad')
+    user_id = db.Column(db.Integer, nullable=False) 
+
+class ProcesoNecesidadesEstado(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    total = db.Column(db.Integer, nullable=False)
+    done = db.Column(db.Integer, default=0)
+    finish = db.Column(db.Boolean, default=False)
+    creado_en = db.Column(db.DateTime, default=datetime.utcnow)
 
 # TABLAS PARA GUARDAR REPORTES EN SQL>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 

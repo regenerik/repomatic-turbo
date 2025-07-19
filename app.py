@@ -19,6 +19,8 @@ from routes.tercer_survey_bp import tercer_survey_bp
 from routes.resumen_comentarios_apies_bp import resumen_comentarios_apies_bp
 from routes.diarios_clasifica_sentimientos_bp import diarios_clasifica_sentimientos_bp
 from routes.clasifica_comentarios_individuales_bp import clasifica_comentarios_individuales_bp
+from routes.comentarios_necesidades_bp import comentarios_necesidades_bp
+from routes.comentarios_necesidades_final_bp import comentarios_necesidades_final_bp
 from database import db                             # Acá importamos la base de datos inicializada
 from flask_cors import CORS                         # Permisos de consumo
 from extensions import init_extensions              # Necesario para que funcione el executor en varios archivos en simultaneo
@@ -75,6 +77,10 @@ app.register_blueprint(cuarto_survey_bp, url_prefix='/')
 app.register_blueprint(quinto_survey_bp, url_prefix='/')
 
 app.register_blueprint(data_mentor_bp, url_prefix='/')
+
+app.register_blueprint(comentarios_necesidades_bp, url_prefix='/')
+
+app.register_blueprint(comentarios_necesidades_final_bp , url_prefix='/')
 
 # DATABASE---------------
 db_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'instance', 'mydatabase.db')
@@ -171,11 +177,66 @@ def cargar_usuarios_iniciales():
     db.session.commit()
     print("Usuarios nuevos cargados con éxito, maestro.")
 
+
+def cargar_topicos_iniciales_si_no_existen():
+    """
+    Verifica si hay exactamente 24 tópicos en la tabla.
+    Si no los hay, borra los existentes y carga los 24 iniciales definidos.
+    """
+    topicos_requeridos = [
+        "MEJORAR_ATENCION_AL_CLIENTE_FULL",
+        "MEJORAR_INFRAESTRUCTURA_BAÑOS",
+        "BUSQUEDA_DE_DESCUENTOS",
+        "LENTITUD_EN_SERVICIO",
+        "FALTA_REPOSICION_DE_PRODUCTOS",
+        "FALTAS_O_ERRORES_EN_PROCESO_DE_PAGO",
+        "PROBLEMAS_EN_CANJE_DE_PRODUCTOS",
+        "MEJORAR_APLICACION_SISTEMA",
+        "VENCIMIENTO_DE_PUNTOS",
+        "INFRAESTRUCTURA_E_INSTALACIONES_FULL",
+        "PRECIOS_ALTOS_EN_PRODUCTOS",
+        "MEJORAR_SERVICIOS_PLAYA",
+        "DESCUENTOS_NO_APLICADOS",
+        "LOGISTICA_Y_ADMINISTRACION_DE_PERSONAL",
+        "MEJORAR_SEÑALIZACIONES",
+        "MEJORAR_ATENCION_AL_CLIENTE_PLAYA",
+        "MEJORAR_CALIDAD_O_VARIEDAD_DE_PRODUCTOS_FULL",
+        "SUMAR_OPCIONES_DIGITALES",
+        "MEJORAR_SISTEMA_DE_PUNTOS",
+        "COBROS_INDEBIDOS_O_INESPERADOS_DE_PRODUCTOS_O_SERVICIOS",
+        "MEJORAS_EN_SEGURIDAD",
+        "MEJORAR_ATENCION_DEFICIENTE_EN_ESPERA",
+        "MEJORAR_HIGIENE_EN_MANIPULACION_DE_ALIMENTOS",
+        "MEJORAR_PRODUCTOS_O_SERVICIOS_PLAYA"
+    ]
+
+    from models import TopicoNecesidad  # ajustá si tu import es distinto
+
+    existentes = TopicoNecesidad.query.count()
+
+    if existentes != len(topicos_requeridos):
+        print(f"⚠️  Se detectaron {existentes} tópicos. Se reemplazarán por los 24 requeridos.")
+
+        # Borrar todos
+        TopicoNecesidad.query.delete()
+        db.session.commit()
+
+        # Insertar los nuevos
+        nuevos = [TopicoNecesidad(nombre_topico=nombre) for nombre in topicos_requeridos]
+        db.session.bulk_save_objects(nuevos)
+        db.session.commit()
+
+        print("✅ Tópicos iniciales cargados correctamente.")
+    else:
+        print("✅ Ya hay 24 tópicos cargados. No se hizo ningún cambio.")
+
 with app.app_context():
     db.init_app(app)
     db.create_all() # Nos aseguramos que este corriendo en el contexto del proyecto.
     cargar_todos_los_reportes_iniciales()  # Cargamos los reportes iniciales
     cargar_usuarios_iniciales()
+    cargar_topicos_iniciales_si_no_existen()
+
 # -----------------------
 
 # AL FINAL ( detecta que encendimos el servidor desde terminal y nos da detalles de los errores )
