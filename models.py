@@ -1,5 +1,6 @@
 from database import db
 from datetime import datetime
+import hashlib
 
 
 class User(db.Model):
@@ -522,7 +523,7 @@ class CuartoSurveySql(db.Model):
 # TABLAS EXPERIENCIA DE CLIENTE
 
 class Comentarios2023(db.Model):
-    __tablename__ = 'comentarios_encuesta'
+    __tablename__ = 'comentarios_encuesta_2023'
 
     id = db.Column(db.Integer, primary_key=True)
     fecha = db.Column(db.DateTime, nullable=True)
@@ -548,3 +549,71 @@ class Comentarios2023(db.Model):
 
     def __repr__(self):
         return f"<ComentarioEncuesta id={self.id} apies={self.apies}>"
+    
+class Comentarios2024(db.Model):
+    __tablename__ = 'comentarios_encuesta_2024'
+
+    id = db.Column(db.Integer, primary_key=True)
+    fecha = db.Column(db.DateTime, nullable=True)
+    apies = db.Column(db.String(255), nullable=True, default="")
+    comentario = db.Column(db.Text, nullable=True, default="")
+    canal = db.Column(db.String(255), nullable=True, default="")
+    topico = db.Column(db.String(255), nullable=True, default="")
+    sentiment = db.Column(db.String(50), nullable=True, default="")
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def serialize(self):
+        return {
+            'id': self.id,
+            'fecha': self.fecha.isoformat() if self.fecha else None,
+            'apies': self.apies,
+            'comentario': self.comentario,
+            'canal': self.canal,
+            'topico': self.topico,
+            'sentiment': self.sentiment,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
+
+    def __repr__(self):
+        return f"<ComentarioEncuesta id={self.id} apies={self.apies}>"
+
+
+class Comentarios2025(db.Model):
+    __tablename__ = 'comentarios_encuesta_2025'
+
+    id = db.Column(db.Integer, primary_key=True)
+    fecha = db.Column(db.DateTime, nullable=True)
+    apies = db.Column(db.String(255), nullable=True, default="")
+    comentario = db.Column(db.Text, nullable=True, default="")
+    canal = db.Column(db.String(255), nullable=True, default="")
+    topico = db.Column(db.String(255), nullable=True, default="")
+    sentiment = db.Column(db.String(50), nullable=True, default="")
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    # Nuevo campo hash único
+    hash_id = db.Column(db.String(64), unique=True, index=True)
+
+    def serialize(self):
+        return {
+            'id': self.id,
+            'fecha': self.fecha.isoformat() if self.fecha else None,
+            'apies': self.apies,
+            'comentario': self.comentario,
+            'canal': self.canal,
+            'topico': self.topico,
+            'sentiment': self.sentiment,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'hash_id': self.hash_id
+        }
+
+    def __repr__(self):
+        return f"<ComentarioEncuesta id={self.id} apies={self.apies}>"
+
+    @staticmethod
+    def generar_hash(fecha, apies, comentario, canal):
+        """
+        Método auxiliar para generar hash_id a partir de los campos clave.
+        """
+        texto = f"{fecha}|{apies}|{comentario}|{canal}"
+        return hashlib.md5(texto.encode('utf-8')).hexdigest()

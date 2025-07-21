@@ -11,8 +11,8 @@ import urllib.request
 import urllib.error
 import json
 import pandas as pd
-from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas,FormularioGestor,CuartoSurveySql, QuintoSurveySql, Comentarios2023
-
+from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas,FormularioGestor,CuartoSurveySql, QuintoSurveySql, Comentarios2023, Comentarios2024, Comentarios2025
+import hashlib
 
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
@@ -123,7 +123,9 @@ MODELS = {
     'FormularioGestor' :FormularioGestor,
     'CuartoSurveySql': CuartoSurveySql,
     'QuintoSurveySql' : QuintoSurveySql,
-    'Comentarios2023': Comentarios2023
+    'Comentarios2023': Comentarios2023,
+    'Comentarios2024': Comentarios2024,
+    'Comentarios2025': Comentarios2025
     # Agregá los modelos que quieras habilitar acá
 }
 
@@ -194,7 +196,7 @@ def get_usuario_sin_id(registro_id):
 # RUTAS PARA CARGAR TABLAS DE EXPERIENCIA 2023 24 y 25
 
 @data_mentor_bp.route('/cargar_comentarios_2023', methods=['POST'])
-def cargar_comentarios_encuesta():
+def cargar_comentarios_encuesta_2023():
     """
     Recibe un archivo .xlsx vía form-data (campo: 'file') y guarda sus registros en la DB
     """
@@ -227,6 +229,116 @@ def cargar_comentarios_encuesta():
         db.session.commit()
 
         return jsonify({'mensaje': f'Se guardaron {len(registros)} comentarios', 'status': 200}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': f'Error al procesar el archivo: {str(e)}', 'status': 500}), 500
+    
+@data_mentor_bp.route('/cargar_comentarios_2024', methods=['POST'])
+def cargar_comentarios_encuesta_2024():
+    """
+    Recibe un archivo .xlsx vía form-data (campo: 'file') y guarda sus registros en la DB
+    """
+    archivo = request.files.get('file')
+    if not archivo:
+        return jsonify({'error': 'No se envió ningún archivo', 'status': 400}), 400
+
+    try:
+        df = pd.read_excel(archivo)
+
+        registros = []
+        for _, fila in df.iterrows():
+            fecha_raw = fila.get('FECHA')
+            try:
+                fecha = pd.to_datetime(fecha_raw) if pd.notnull(fecha_raw) else None
+            except:
+                fecha = None
+
+            nuevo = Comentarios2024(
+                fecha=fecha,
+                apies=str(fila.get('APIES', '')).strip(),
+                comentario=str(fila.get('COMENTARIO', '')).strip(),
+                canal=str(fila.get('CANAL', '')).strip(),
+                topico=str(fila.get('TÓPICO', '')).strip(),
+                sentiment=str(fila.get('SENTIMENT', '')).strip()
+            )
+            registros.append(nuevo)
+
+        db.session.add_all(registros)
+        db.session.commit()
+
+        return jsonify({'mensaje': f'Se guardaron {len(registros)} comentarios', 'status': 200}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': f'Error al procesar el archivo: {str(e)}', 'status': 500}), 500
+    
+@data_mentor_bp.route('/cargar_comentarios_2025', methods=['POST'])
+def cargar_comentarios_encuesta_2025():
+    """
+    Carga masiva de comentarios desde archivo .xlsx.
+    Detecta duplicados por hash_id antes de insertar y usa bulk_save_objects para velocidad.
+    """
+    archivo = request.files.get('file')
+    if not archivo:
+        return jsonify({'error': 'No se envió ningún archivo', 'status': 400}), 400
+
+    try:
+        df = pd.read_excel(archivo)
+
+        # Paso 1: Preparamos todos los registros con hash
+        candidatos = []
+        hash_ids = []
+
+        for _, fila in df.iterrows():
+            fecha_raw = fila.get('FECHA')
+            try:
+                fecha = pd.to_datetime(fecha_raw) if pd.notnull(fecha_raw) else None
+            except:
+                fecha = None
+
+            apies = str(fila.get('APIES', '')).strip()
+            comentario = str(fila.get('COMENTARIO', '')).strip()
+            canal = str(fila.get('CANAL', '')).strip()
+            topico = str(fila.get('TÓPICO', '')).strip()
+            sentiment = str(fila.get('SENTIMENT', '')).strip()
+
+            # Hash único
+            hash_id = Comentarios2025.generar_hash(fecha, apies, comentario, canal)
+
+            comentario_obj = Comentarios2025(
+                fecha=fecha,
+                apies=apies,
+                comentario=comentario,
+                canal=canal,
+                topico=topico,
+                sentiment=sentiment,
+                hash_id=hash_id
+            )
+
+            candidatos.append(comentario_obj)
+            hash_ids.append(hash_id)
+
+        # Paso 2: Buscar cuáles ya existen
+        existentes = set(
+            r[0] for r in db.session.query(Comentarios2025.hash_id)
+            .filter(Comentarios2025.hash_id.in_(hash_ids))
+            .all()
+        )
+
+        # Paso 3: Filtrar duplicados
+        nuevos = [c for c in candidatos if c.hash_id not in existentes]
+
+        # Paso 4: Insertar de forma masiva
+        if nuevos:
+            db.session.bulk_save_objects(nuevos)
+            db.session.commit()
+
+        return jsonify({
+            'mensaje': f'Se guardaron {len(nuevos)} comentarios nuevos',
+            'duplicados_ignorados': len(candidatos) - len(nuevos),
+            'status': 200
+        }), 200
 
     except Exception as e:
         db.session.rollback()
