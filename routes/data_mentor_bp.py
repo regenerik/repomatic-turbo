@@ -11,7 +11,7 @@ import urllib.request
 import urllib.error
 import json
 import pandas as pd
-from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas,FormularioGestor,CuartoSurveySql, QuintoSurveySql, Comentarios2023, Comentarios2024, Comentarios2025, BaseLoopEstaciones
+from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas,FormularioGestor,CuartoSurveySql, QuintoSurveySql, Comentarios2023, Comentarios2024, Comentarios2025, BaseLoopEstaciones, FichasGoogleCompetencia
 import hashlib
 from sqlalchemy.exc import SQLAlchemyError
 import csv
@@ -128,7 +128,8 @@ MODELS = {
     'Comentarios2023': Comentarios2023,
     'Comentarios2024': Comentarios2024,
     'Comentarios2025': Comentarios2025,
-    'BaseLoopEstaciones' : BaseLoopEstaciones
+    'BaseLoopEstaciones' : BaseLoopEstaciones,
+    'FichasGoogleCompetencia' : FichasGoogleCompetencia
     # Agregá los modelos que quieras habilitar acá
 }
 
@@ -390,3 +391,65 @@ def cargar_base_loop():
         return jsonify({"error": f"Error al insertar en la base de datos: {e}"}), 500
     except Exception as e:
         return jsonify({"error": f"Error al procesar el archivo: {e}"}), 500
+    
+@data_mentor_bp.route('/cargar_fichas_google_competencia', methods=['POST'])
+def cargar_fichas_google_competencia():
+    archivo = request.files.get('file')
+    if not archivo:
+        return jsonify({'error': 'No se envió ningún archivo', 'status': 400}), 400
+
+    try:
+        df = pd.read_excel(archivo)
+
+        candidatos = []
+        hash_ids = []
+        hash_set_memoria = set()
+
+        for _, fila in df.iterrows():
+            id_loop = str(fila.get('idLoop', '')).strip()
+            total_review_count = str(fila.get('totalReviewCount', '')).strip()
+            average_rating = str(fila.get('averageRating', '')).strip()
+
+            # Saltear filas con campos vacíos importantes
+            if not id_loop or not total_review_count or not average_rating:
+                continue
+
+            hash_id = FichasGoogleCompetencia.generar_hash(id_loop, total_review_count, average_rating)
+
+            # Saltear si ya está en memoria (repetido en el mismo archivo)
+            if hash_id in hash_set_memoria:
+                continue
+            hash_set_memoria.add(hash_id)
+
+            ficha_obj = FichasGoogleCompetencia(
+                id_loop=id_loop,
+                total_review_count=total_review_count,
+                average_rating=average_rating,
+                hash_id=hash_id
+            )
+
+            candidatos.append(ficha_obj)
+            hash_ids.append(hash_id)
+
+        # Buscar duplicados ya existentes en la DB
+        existentes = set(
+            r[0] for r in db.session.query(FichasGoogleCompetencia.hash_id)
+            .filter(FichasGoogleCompetencia.hash_id.in_(hash_ids))
+            .all()
+        )
+
+        nuevos = [f for f in candidatos if f.hash_id not in existentes]
+
+        if nuevos:
+            db.session.bulk_save_objects(nuevos)
+            db.session.commit()
+
+        return jsonify({
+            'mensaje': f'Se guardaron {len(nuevos)} fichas nuevas',
+            'preexistentes_ignorados': len(candidatos) - len(nuevos),
+            'status': 200
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': f'Error al procesar el archivo: {str(e)}', 'status': 500}), 500

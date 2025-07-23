@@ -748,3 +748,16 @@ class BaseLoopEstaciones(db.Model):
     def __repr__(self):
         return f"<DatosOperativos2025 id={self.id}>"
     
+class FichasGoogleCompetencia(db.Model):
+    __tablename__ = 'fichas_google_competencia'
+
+    id = db.Column(db.Integer, primary_key=True)
+    id_loop = db.Column('idLoop', db.String(255), nullable=True)
+    total_review_count = db.Column('totalReviewCount', db.String(255), nullable=True)
+    average_rating = db.Column('averageRating', db.String(255), nullable=True)
+    hash_id = db.Column(db.String(64), unique=True, index=True)
+
+    @staticmethod
+    def generar_hash(id_loop, total_review_count, average_rating):
+        texto = f"{id_loop}|{total_review_count}|{average_rating}"
+        return hashlib.md5(texto.encode('utf-8')).hexdigest()
