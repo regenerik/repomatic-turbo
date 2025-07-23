@@ -11,7 +11,7 @@ import urllib.request
 import urllib.error
 import json
 import pandas as pd
-from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas,FormularioGestor,CuartoSurveySql, QuintoSurveySql, Comentarios2023, Comentarios2024, Comentarios2025, BaseLoopEstaciones, FichasGoogleCompetencia, FichasGoogle, SalesForce
+from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas,FormularioGestor,CuartoSurveySql, QuintoSurveySql, Comentarios2023, Comentarios2024, Comentarios2025, BaseLoopEstaciones, FichasGoogleCompetencia, FichasGoogle, SalesForce, ComentariosCompetencia
 import hashlib
 from sqlalchemy.exc import SQLAlchemyError
 import csv
@@ -131,7 +131,8 @@ MODELS = {
     'BaseLoopEstaciones' : BaseLoopEstaciones,
     'FichasGoogleCompetencia' : FichasGoogleCompetencia,
     'FichasGoogle' : FichasGoogle,
-    'SalesForce' : SalesForce
+    'SalesForce' : SalesForce,
+    'ComentariosCompetencia' : ComentariosCompetencia
     # Agregá los modelos que quieras habilitar acá
 }
 
@@ -601,3 +602,58 @@ def cargar_salesforce():
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': f'Error al procesar el archivo: {str(e)}', 'status': 500}), 500
+    
+@data_mentor_bp.route('/cargar_comentarios_competencia', methods=['POST'])
+def cargar_comentarios_competencia():
+    archivo = request.files.get('file')
+    if not archivo:
+        return jsonify({'error': 'No se recibió ningún archivo'}), 400
+
+    try:
+        df = pd.read_excel(archivo)
+
+        # Normalizar la fecha
+        if 'FECHA' in df.columns:
+            df['FECHA'] = df['FECHA'].astype(str)
+
+
+        # Renombrar columna ID si existe
+        if 'ID' in df.columns:
+            df.rename(columns={'ID': 'ID_ORIGINAL'}, inplace=True)
+
+        # Reemplazamos espacios y ponemos mayúsculas para asegurar
+        df.columns = [col.upper().replace(" ", "_") for col in df.columns]
+
+        nuevos = []
+        for _, fila in df.iterrows():
+            hash_id = ComentariosCompetencia.generar_hash(
+                fila.get('ID_ORIGINAL', ''),
+                fila.get('FECHA', ''),
+                fila.get('IDLOOP', ''),
+                fila.get('COMENTARIO', ''),
+                fila.get('RATING', ''),
+                fila.get('SENTIMIENTO', ''),
+                fila.get('TÓPICO', '')
+            )
+
+            # Chequeamos si ya existe
+            if not ComentariosCompetencia.query.filter_by(hash_id=hash_id).first():
+                nuevo = ComentariosCompetencia(
+                    id_original=fila.get('ID_ORIGINAL'),
+                    fecha=fila.get('FECHA'),
+                    id_loop=fila.get('IDLOOP'),
+                    comentario=fila.get('COMENTARIO'),
+                    rating=fila.get('RATING'),
+                    sentimiento=fila.get('SENTIMIENTO'),
+                    topico=fila.get('TÓPICO'),
+                    hash_id=hash_id
+                )
+                nuevos.append(nuevo)
+
+        db.session.bulk_save_objects(nuevos)
+        db.session.commit()
+
+        return jsonify({'guardados': len(nuevos)})
+
+    except Exception as e:
+        return jsonify({'error': f'Error al procesar el archivo: {str(e)}'}), 500

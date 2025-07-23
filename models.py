@@ -802,3 +802,21 @@ class SalesForce(db.Model):
     def generar_hash(*args):
         texto = '|'.join(str(arg).strip() for arg in args)
         return hashlib.md5(texto.encode('utf-8')).hexdigest()
+    
+class ComentariosCompetencia(db.Model):
+    __tablename__ = 'comentarios_competencia'
+
+    id = db.Column(db.Integer, primary_key=True)
+    id_original = db.Column('ID_ORIGINAL', db.String(255))
+    fecha = db.Column('FECHA', db.String(255))
+    id_loop = db.Column('IDLOOP', db.String(255))
+    comentario = db.Column('COMENTARIO', db.Text)
+    rating = db.Column('RATING', db.String(255))
+    sentimiento = db.Column('SENTIMIENTO', db.String(255))
+    topico = db.Column('TÓPICO', db.String(255))
+    hash_id = db.Column(db.String(64), unique=True, index=True)
+
+    @staticmethod
+    def generar_hash(id_original, fecha, id_loop, comentario, rating, sentimiento, topico):
+        texto = f"{id_original}|{fecha}|{id_loop}|{comentario}|{rating}|{sentimiento}|{topico}"
+        return hashlib.md5(texto.encode('utf-8')).hexdigest()
