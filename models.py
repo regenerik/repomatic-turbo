@@ -775,3 +775,30 @@ class FichasGoogle(db.Model):
     def generar_hash(store_code, cantidad_de_calificaciones, start_rating):
         texto = f"{store_code}|{cantidad_de_calificaciones}|{start_rating}"
         return hashlib.md5(texto.encode('utf-8')).hexdigest()
+    
+class SalesForce(db.Model):
+    __tablename__ = 'salesforce'
+
+    id = db.Column(db.Integer, primary_key=True)
+    estacion_servicio_zona = db.Column('Estacion de Servicio: Zona', db.String(255))
+    numero_de_caso = db.Column('Número del caso', db.String(255))
+    estado = db.Column('Estado', db.String(255))
+    tipificacion_caso = db.Column('Tipificación Caso', db.String(255))
+    asunto = db.Column('Asunto', db.String(255))
+    fecha_apertura = db.Column('Fecha/Hora de apertura', db.String(255))
+    cantidad_reclamos = db.Column('Cantidad de Reclamos', db.String(255))
+    defensa_consumidor = db.Column('Defensa al Consumidor', db.String(255))
+    ggrr_cola_asignado = db.Column('GGRR/COLA Asignado', db.String(255))
+    propietario_nombre = db.Column('Propietario del caso: Nombre completo', db.String(255))
+    descripcion = db.Column('Descripción', db.Text)
+    contacto_nombre = db.Column('Nombre del contacto: Nombre completo', db.String(255))
+    comentarios = db.Column('Comentarios', db.Text)
+    razon_social = db.Column('Estacion de Servicio: Razón Social', db.String(255))
+    red = db.Column('Estacion de Servicio: Red', db.String(255))
+    regional = db.Column('Estacion de Servicio: Regional', db.String(255))
+    hash_id = db.Column(db.String(64), unique=True, index=True)
+
+    @staticmethod
+    def generar_hash(*args):
+        texto = '|'.join(str(arg).strip() for arg in args)
+        return hashlib.md5(texto.encode('utf-8')).hexdigest()

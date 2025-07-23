@@ -11,7 +11,7 @@ import urllib.request
 import urllib.error
 import json
 import pandas as pd
-from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas,FormularioGestor,CuartoSurveySql, QuintoSurveySql, Comentarios2023, Comentarios2024, Comentarios2025, BaseLoopEstaciones, FichasGoogleCompetencia, FichasGoogle
+from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas,FormularioGestor,CuartoSurveySql, QuintoSurveySql, Comentarios2023, Comentarios2024, Comentarios2025, BaseLoopEstaciones, FichasGoogleCompetencia, FichasGoogle, SalesForce
 import hashlib
 from sqlalchemy.exc import SQLAlchemyError
 import csv
@@ -130,7 +130,8 @@ MODELS = {
     'Comentarios2025': Comentarios2025,
     'BaseLoopEstaciones' : BaseLoopEstaciones,
     'FichasGoogleCompetencia' : FichasGoogleCompetencia,
-    'FichasGoogle' : FichasGoogle
+    'FichasGoogle' : FichasGoogle,
+    'SalesForce' : SalesForce
     # Agregá los modelos que quieras habilitar acá
 }
 
@@ -509,6 +510,90 @@ def cargar_fichas_google():
 
         return jsonify({
             'mensaje': f'Se guardaron {len(nuevos)} fichas nuevas',
+            'preexistentes_ignorados': len(candidatos) - len(nuevos),
+            'status': 200
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': f'Error al procesar el archivo: {str(e)}', 'status': 500}), 500
+    
+@data_mentor_bp.route('/cargar_salesforce', methods=['POST'])
+def cargar_salesforce():
+    archivo = request.files.get('file')
+    if not archivo:
+        return jsonify({'error': 'No se envió ningún archivo', 'status': 400}), 400
+
+    try:
+        df = pd.read_excel(archivo)
+
+        candidatos = []
+        hash_ids = []
+        hash_set_memoria = set()
+
+        for _, fila in df.iterrows():
+            valores = [
+                fila.get('Estacion de Servicio: Zona', ''),
+                fila.get('Número del caso', ''),
+                fila.get('Estado', ''),
+                fila.get('Tipificación Caso', ''),
+                fila.get('Asunto', ''),
+                fila.get('Fecha/Hora de apertura', ''),
+                fila.get('Cantidad de Reclamos', ''),
+                fila.get('Defensa al Consumidor', ''),
+                fila.get('GGRR/COLA Asignado', ''),
+                fila.get('Propietario del caso: Nombre completo', ''),
+                fila.get('Descripción', ''),
+                fila.get('Nombre del contacto: Nombre completo', ''),
+                fila.get('Comentarios', ''),
+                fila.get('Estacion de Servicio: Razón Social', ''),
+                fila.get('Estacion de Servicio: Red', ''),
+                fila.get('Estacion de Servicio: Regional', ''),
+            ]
+
+            hash_id = SalesForce.generar_hash(*valores)
+
+            if hash_id in hash_set_memoria:
+                continue
+            hash_set_memoria.add(hash_id)
+
+            registro = SalesForce(
+                estacion_servicio_zona=valores[0],
+                numero_de_caso=valores[1],
+                estado=valores[2],
+                tipificacion_caso=valores[3],
+                asunto=valores[4],
+                fecha_apertura=valores[5],
+                cantidad_reclamos=valores[6],
+                defensa_consumidor=valores[7],
+                ggrr_cola_asignado=valores[8],
+                propietario_nombre=valores[9],
+                descripcion=valores[10],
+                contacto_nombre=valores[11],
+                comentarios=valores[12],
+                razon_social=valores[13],
+                red=valores[14],
+                regional=valores[15],
+                hash_id=hash_id
+            )
+
+            candidatos.append(registro)
+            hash_ids.append(hash_id)
+
+        existentes = set(
+            r[0] for r in db.session.query(SalesForce.hash_id)
+            .filter(SalesForce.hash_id.in_(hash_ids))
+            .all()
+        )
+
+        nuevos = [r for r in candidatos if r.hash_id not in existentes]
+
+        if nuevos:
+            db.session.bulk_save_objects(nuevos)
+            db.session.commit()
+
+        return jsonify({
+            'mensaje': f'Se guardaron {len(nuevos)} casos nuevos',
             'preexistentes_ignorados': len(candidatos) - len(nuevos),
             'status': 200
         }), 200
