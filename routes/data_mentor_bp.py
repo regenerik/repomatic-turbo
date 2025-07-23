@@ -11,8 +11,10 @@ import urllib.request
 import urllib.error
 import json
 import pandas as pd
-from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas,FormularioGestor,CuartoSurveySql, QuintoSurveySql, Comentarios2023, Comentarios2024, Comentarios2025
+from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas,FormularioGestor,CuartoSurveySql, QuintoSurveySql, Comentarios2023, Comentarios2024, Comentarios2025, BaseLoopEstaciones
 import hashlib
+from sqlalchemy.exc import SQLAlchemyError
+import csv
 
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
@@ -125,7 +127,8 @@ MODELS = {
     'QuintoSurveySql' : QuintoSurveySql,
     'Comentarios2023': Comentarios2023,
     'Comentarios2024': Comentarios2024,
-    'Comentarios2025': Comentarios2025
+    'Comentarios2025': Comentarios2025,
+    'BaseLoopEstaciones' : BaseLoopEstaciones
     # Agregá los modelos que quieras habilitar acá
 }
 
@@ -343,3 +346,47 @@ def cargar_comentarios_encuesta_2025():
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': f'Error al procesar el archivo: {str(e)}', 'status': 500}), 500
+    
+@data_mentor_bp.route('/cargar_base_loop', methods=['POST'])
+def cargar_base_loop():
+    archivo = request.files.get('file')
+    if not archivo:
+        return jsonify({"error": "No se envió ningún archivo"}), 400
+
+    try:
+        # Detectar delimitador (coma o punto y coma)
+        sample = archivo.read(2048).decode('utf-8')
+        archivo.seek(0)
+        delimiter = csv.Sniffer().sniff(sample).delimiter
+
+        df = pd.read_csv(archivo, sep=delimiter, encoding='utf-8', on_bad_lines='skip')
+    except Exception as e:
+        return jsonify({"error": f"Error al leer el archivo CSV: {e}"}), 400
+
+    try:
+        columnas_db = {col.name: col.key for col in BaseLoopEstaciones.__table__.columns}
+
+        registros = []
+        for _, fila in df.iterrows():
+            datos_instancia = {}
+            for nombre_col_csv, valor in fila.items():
+                if nombre_col_csv in columnas_db:
+                    campo_para_modelo = columnas_db[nombre_col_csv]
+                    datos_instancia[campo_para_modelo] = valor
+
+            # Instanciamos así para evitar el error de keyword inválido
+            instancia = BaseLoopEstaciones()
+            for key, val in datos_instancia.items():
+                setattr(instancia, key, val)
+            registros.append(instancia)
+
+        db.session.bulk_save_objects(registros)
+        db.session.commit()
+
+        return jsonify({"mensaje": f"{len(registros)} registros insertados correctamente"}), 200
+
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        return jsonify({"error": f"Error al insertar en la base de datos: {e}"}), 500
+    except Exception as e:
+        return jsonify({"error": f"Error al procesar el archivo: {e}"}), 500
