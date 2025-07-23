@@ -11,7 +11,7 @@ import urllib.request
 import urllib.error
 import json
 import pandas as pd
-from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas,FormularioGestor,CuartoSurveySql, QuintoSurveySql, Comentarios2023, Comentarios2024, Comentarios2025, BaseLoopEstaciones, FichasGoogleCompetencia
+from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas,FormularioGestor,CuartoSurveySql, QuintoSurveySql, Comentarios2023, Comentarios2024, Comentarios2025, BaseLoopEstaciones, FichasGoogleCompetencia, FichasGoogle
 import hashlib
 from sqlalchemy.exc import SQLAlchemyError
 import csv
@@ -129,7 +129,8 @@ MODELS = {
     'Comentarios2024': Comentarios2024,
     'Comentarios2025': Comentarios2025,
     'BaseLoopEstaciones' : BaseLoopEstaciones,
-    'FichasGoogleCompetencia' : FichasGoogleCompetencia
+    'FichasGoogleCompetencia' : FichasGoogleCompetencia,
+    'FichasGoogle' : FichasGoogle
     # Agregá los modelos que quieras habilitar acá
 }
 
@@ -435,6 +436,68 @@ def cargar_fichas_google_competencia():
         existentes = set(
             r[0] for r in db.session.query(FichasGoogleCompetencia.hash_id)
             .filter(FichasGoogleCompetencia.hash_id.in_(hash_ids))
+            .all()
+        )
+
+        nuevos = [f for f in candidatos if f.hash_id not in existentes]
+
+        if nuevos:
+            db.session.bulk_save_objects(nuevos)
+            db.session.commit()
+
+        return jsonify({
+            'mensaje': f'Se guardaron {len(nuevos)} fichas nuevas',
+            'preexistentes_ignorados': len(candidatos) - len(nuevos),
+            'status': 200
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': f'Error al procesar el archivo: {str(e)}', 'status': 500}), 500
+
+@data_mentor_bp.route('/cargar_fichas_google', methods=['POST'])
+def cargar_fichas_google():
+    archivo = request.files.get('file')
+    if not archivo:
+        return jsonify({'error': 'No se envió ningún archivo', 'status': 400}), 400
+
+    try:
+        df = pd.read_excel(archivo)
+
+        candidatos = []
+        hash_ids = []
+        hash_set_memoria = set()
+
+        for _, fila in df.iterrows():
+            store_code = str(fila.get('Store Code', '')).strip()
+            cantidad_de_calificaciones = str(fila.get('Cantidad de calificaciones', '')).strip()
+            start_rating = str(fila.get('Star Rating', '')).strip()
+
+            # Saltear filas con campos vacíos importantes
+            if not store_code or not cantidad_de_calificaciones or not start_rating:
+                continue
+
+            hash_id = FichasGoogle.generar_hash(store_code, cantidad_de_calificaciones, start_rating)
+
+            # Saltear si ya está en memoria (repetido en el mismo archivo)
+            if hash_id in hash_set_memoria:
+                continue
+            hash_set_memoria.add(hash_id)
+
+            ficha_obj = FichasGoogle(
+                store_code=store_code,
+                cantidad_de_calificaciones=cantidad_de_calificaciones,
+                start_rating=start_rating,
+                hash_id=hash_id
+            )
+
+            candidatos.append(ficha_obj)
+            hash_ids.append(hash_id)
+
+        # Buscar duplicados ya existentes en la DB
+        existentes = set(
+            r[0] for r in db.session.query(FichasGoogle.hash_id)
+            .filter(FichasGoogle.hash_id.in_(hash_ids))
             .all()
         )
 

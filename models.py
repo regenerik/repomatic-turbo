@@ -761,3 +761,17 @@ class FichasGoogleCompetencia(db.Model):
     def generar_hash(id_loop, total_review_count, average_rating):
         texto = f"{id_loop}|{total_review_count}|{average_rating}"
         return hashlib.md5(texto.encode('utf-8')).hexdigest()
+    
+class FichasGoogle(db.Model):
+    __tablename__ = 'fichas_google'
+
+    id = db.Column(db.Integer, primary_key=True)
+    store_code = db.Column('Store Code', db.String(255), nullable=True)
+    cantidad_de_calificaciones = db.Column('Cantidad de calificaciones', db.String(255), nullable=True)
+    start_rating = db.Column('Star Rating', db.String(255), nullable=True)
+    hash_id = db.Column(db.String(64), unique=True, index=True)
+
+    @staticmethod
+    def generar_hash(store_code, cantidad_de_calificaciones, start_rating):
+        texto = f"{store_code}|{cantidad_de_calificaciones}|{start_rating}"
+        return hashlib.md5(texto.encode('utf-8')).hexdigest()
