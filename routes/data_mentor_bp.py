@@ -11,21 +11,30 @@ import urllib.request
 import urllib.error
 import json
 import pandas as pd
-from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas,FormularioGestor,CuartoSurveySql, QuintoSurveySql, Comentarios2023, Comentarios2024, Comentarios2025, BaseLoopEstaciones, FichasGoogleCompetencia, FichasGoogle, SalesForce, ComentariosCompetencia
+from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas,FormularioGestor,CuartoSurveySql, QuintoSurveySql, Comentarios2023, Comentarios2024, Comentarios2025, BaseLoopEstaciones, FichasGoogleCompetencia, FichasGoogle, SalesForce, ComentariosCompetencia, FileDailyID
 import hashlib
 from sqlalchemy.exc import SQLAlchemyError
 import csv
+import time
+import tempfile
+from openai import OpenAI
+import httpx
+from tempfile import NamedTemporaryFile
+
 
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise ValueError("Debes definir la variable de entorno OPENAI_API_KEY con tu clave de API.")
 
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
 HEADERS = {
     "Content-Type": "application/json",
     "Authorization": f"Bearer {OPENAI_API_KEY}",
     "OpenAI-Beta": "assistants=v2"
 }
+
 
 data_mentor_bp = Blueprint('data_mentor_bp', __name__)     # instanciar admin_bp desde clase Blueprint para crear las rutas.
 bcrypt = Bcrypt()
@@ -284,7 +293,8 @@ def cargar_comentarios_encuesta_2024():
 def cargar_comentarios_encuesta_2025():
     """
     Carga masiva de comentarios desde archivo .xlsx.
-    Detecta duplicados por hash_id antes de insertar y usa bulk_save_objects para velocidad.
+    Detecta duplicados por hash_id (tanto en DB como en el archivo actual)
+    y usa bulk_save_objects para velocidad.
     """
     archivo = request.files.get('file')
     if not archivo:
@@ -293,15 +303,18 @@ def cargar_comentarios_encuesta_2025():
     try:
         df = pd.read_excel(archivo)
 
-        # Paso 1: Preparamos todos los registros con hash
-        candidatos = []
-        hash_ids = []
+        # Paso 1: Preparamos todos los registros con hash,
+        #         filtrando duplicados DENTRO del archivo actual
+        records_from_file = []
+        # Usamos un set para rastrear los hashes ya vistos en ESTE ARCHIVO
+        unique_hashes_in_current_file = set()
 
         for _, fila in df.iterrows():
             fecha_raw = fila.get('FECHA')
             try:
                 fecha = pd.to_datetime(fecha_raw) if pd.notnull(fecha_raw) else None
-            except:
+            except Exception as e:
+                logger.warning(f"Error al parsear fecha '{fecha_raw}': {e}. Asignando None.")
                 fecha = None
 
             apies = str(fila.get('APIES', '')).strip()
@@ -310,8 +323,15 @@ def cargar_comentarios_encuesta_2025():
             topico = str(fila.get('TÓPICO', '')).strip()
             sentiment = str(fila.get('SENTIMENT', '')).strip()
 
-            # Hash único
+            # Generar hash único para este registro
             hash_id = Comentarios2025.generar_hash(fecha, apies, comentario, canal)
+
+            # Verificar si este hash_id ya fue visto en el archivo ACTUAL
+            if hash_id in unique_hashes_in_current_file:
+                logger.info(f"Saltando registro duplicado DENTRO DEL ARCHIVO con hash_id: {hash_id}")
+                continue # Saltar esta fila, ya la procesamos o es un duplicado interno
+
+            unique_hashes_in_current_file.add(hash_id) # Registrar este hash_id como visto
 
             comentario_obj = Comentarios2025(
                 fecha=fecha,
@@ -322,19 +342,19 @@ def cargar_comentarios_encuesta_2025():
                 sentiment=sentiment,
                 hash_id=hash_id
             )
+            records_from_file.append(comentario_obj)
 
-            candidatos.append(comentario_obj)
-            hash_ids.append(hash_id)
+        # Paso 2: Buscar cuáles de los hashes únicos del archivo ya existen en la base de datos
+        all_unique_hashes_from_file = [r.hash_id for r in records_from_file]
 
-        # Paso 2: Buscar cuáles ya existen
-        existentes = set(
+        existentes_en_db = set(
             r[0] for r in db.session.query(Comentarios2025.hash_id)
-            .filter(Comentarios2025.hash_id.in_(hash_ids))
+            .filter(Comentarios2025.hash_id.in_(all_unique_hashes_from_file))
             .all()
         )
 
-        # Paso 3: Filtrar duplicados
-        nuevos = [c for c in candidatos if c.hash_id not in existentes]
+        # Paso 3: Filtrar duplicados que ya existen en la DB
+        nuevos = [c for c in records_from_file if c.hash_id not in existentes_en_db]
 
         # Paso 4: Insertar de forma masiva
         if nuevos:
@@ -343,12 +363,14 @@ def cargar_comentarios_encuesta_2025():
 
         return jsonify({
             'mensaje': f'Se guardaron {len(nuevos)} comentarios nuevos',
-            'duplicados_ignorados': len(candidatos) - len(nuevos),
+            'duplicados_ignorados_en_archivo': len(df) - len(records_from_file), # Nuevos: cuántos se descartaron por ser duplicados en el archivo
+            'duplicados_ignorados_en_db': len(records_from_file) - len(nuevos),  # Cuántos se descartaron por ya estar en la DB
             'status': 200
         }), 200
 
     except Exception as e:
         db.session.rollback()
+        logger.error(f"Error al procesar el archivo de comentarios 2025: {e}", exc_info=True)
         return jsonify({'error': f'Error al procesar el archivo: {str(e)}', 'status': 500}), 500
     
 @data_mentor_bp.route('/cargar_base_loop', methods=['POST'])
@@ -657,3 +679,137 @@ def cargar_comentarios_competencia():
 
     except Exception as e:
         return jsonify({'error': f'Error al procesar el archivo: {str(e)}'}), 500
+    
+
+
+# LA COMPILACION Y SUBIDA DEL JSON DE TODA LA DATA>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+
+@data_mentor_bp.route("/actualizar-archivos-asistente", methods=["POST"])
+def actualizar_archivos_asistente():
+    tmpfile_path = None # Inicializar a None para asegurar que siempre se borre si existe
+    try:
+        logger.info("Iniciando el proceso de actualización del archivo de conocimiento diario para OpenAI.")
+
+        # --- 1. Recopilar datos de todas las tablas y generar JSON temporal ---
+        logger.info("Recopilando datos de todas las tablas...")
+
+        # Recuperación de los datos de todas las tablas
+        comentarios_2025 = Comentarios2025.query.all()
+        fichas_google = FichasGoogle.query.all()
+        fichas_google_competencia = FichasGoogleCompetencia.query.all()
+        usuarios_por_asignacion = Usuarios_Por_Asignacion.query.all()
+        usuarios_sin_id = Usuarios_Sin_ID.query.all()
+        valida_usuarios = ValidaUsuarios.query.all()
+        detalle_apies = DetalleApies.query.all()
+        avance_cursada = AvanceCursada.query.all()
+        detalles_de_cursos = DetallesDeCursos.query.all()
+        cursadas_agrupadas = CursadasAgrupadas.query.all()
+        formulario_gestor = FormularioGestor.query.all()
+        cuarto_survey_sql = CuartoSurveySql.query.all()
+        quinto_survey_sql = QuintoSurveySql.query.all()
+        comentarios_2023 = Comentarios2023.query.all()
+        comentarios_2024 = Comentarios2024.query.all()
+        base_loop_estaciones = BaseLoopEstaciones.query.all()
+        sales_force = SalesForce.query.all()
+        comentarios_competencia = ComentariosCompetencia.query.all()
+
+        # Creación del diccionario JSON con todos los datos serializados
+        data_json = {
+            "comentarios_2025": [c.serialize() for c in comentarios_2025],
+            "fichas_google": [f.serialize() for f in fichas_google],
+            "fichas_google_competencia": [f.serialize() for f in fichas_google_competencia],
+            "usuarios_por_asignacion": [u.serialize() for u in usuarios_por_asignacion],
+            "usuarios_sin_id": [u.serialize() for u in usuarios_sin_id],
+            "valida_usuarios": [v.serialize() for v in valida_usuarios],
+            "detalle_apies": [d.serialize() for d in detalle_apies],
+            "avance_cursada": [a.serialize() for a in avance_cursada],
+            "detalles_de_cursos": [d.serialize() for d in detalles_de_cursos],
+            "cursadas_agrupadas": [c.serialize() for c in cursadas_agrupadas],
+            "formulario_gestor": [f.serialize() for f in formulario_gestor],
+            "cuarto_survey_sql": [c.serialize() for c in cuarto_survey_sql],
+            "quinto_survey_sql": [q.serialize() for q in quinto_survey_sql],
+            "comentarios_2023": [c.serialize() for c in comentarios_2023],
+            "comentarios_2024": [c.serialize() for c in comentarios_2024],
+            "base_loop_estaciones": [b.serialize() for b in base_loop_estaciones],
+            "sales_force": [s.serialize() for s in sales_force],
+            "comentarios_competencia": [c.serialize() for c in comentarios_competencia]
+        }
+
+        # Crear un archivo JSON temporal para escribir los datos
+        with NamedTemporaryFile(mode="w+", delete=False, suffix=".json", encoding="utf-8") as tmpfile:
+            json.dump(data_json, tmpfile, indent=2, ensure_ascii=False)
+            tmpfile.flush() # Asegura que todos los datos se escriban en el disco
+            tmpfile_path = tmpfile.name
+        # En este punto, el primer handle del archivo (el de escritura) ya está cerrado.
+
+        file_size = os.path.getsize(tmpfile_path) / (1024 * 1024)
+        logger.info(f"Tamaño final del archivo JSON temporal: {file_size:.2f} MB")
+
+        # --- 2. Subir el nuevo archivo JSON a OpenAI ---
+        logger.info("Subiendo el nuevo archivo JSON a OpenAI...")
+        # Abrir el archivo DE NUEVO, pero esta vez solo para lectura binaria,
+        # y usar un bloque 'with' para asegurar que se cierre inmediatamente
+        # después de que la API de OpenAI lo lea.
+        with open(tmpfile_path, "rb") as file_to_upload:
+            uploaded_file = client.files.create(
+                file=file_to_upload, # Pasa el objeto de archivo abierto
+                purpose="assistants" # Propósito para uso con Assistants y File Search
+            )
+        # Aquí, el 'file_to_upload' está garantizado de ser cerrado.
+
+        new_file_id = uploaded_file.id
+        logger.info(f"Nuevo archivo JSON subido con éxito. File ID: {new_file_id}")
+
+        # --- 3. Eliminar archivo existente previamente de OpenAI (si lo hay) ---
+        # Buscamos el registro del file_id del día anterior en nuestra DB
+        existing_file_record = FileDailyID.query.first() # Suponemos que solo guardas 1 ID actual
+
+        if existing_file_record:
+            old_file_id = existing_file_record.current_file_id
+            logger.info(f"Se encontró un archivo antiguo para eliminar con ID: {old_file_id}")
+            try:
+                # Intenta eliminar el archivo de OpenAI
+                client.files.delete(old_file_id)
+                logger.info(f"Archivo antiguo '{old_file_id}' eliminado exitosamente de OpenAI.")
+            except Exception as e:
+                # Es posible que el archivo ya no exista (ej. borrado manual o por un error anterior)
+                # Registra el warning, pero no detengas el proceso, ya que el objetivo es asegurar
+                # que el nuevo archivo sea el que esté disponible.
+                logger.warning(f"No se pudo eliminar el archivo antiguo '{old_file_id}' de OpenAI. Causa: {e}")
+            
+            # Actualiza el registro existente en tu DB con el nuevo file_id
+            existing_file_record.current_file_id = new_file_id
+            db.session.add(existing_file_record) # Opcional, pero explícito para algunos ORMs
+            db.session.commit()
+            logger.info(f"ID de archivo actualizado en la base de datos a: {new_file_id}")
+        else:
+            logger.info("No se encontró un archivo anterior registrado en la base de datos.")
+            # Si no hay registro, crea uno nuevo para el file_id actual
+            new_record = FileDailyID(current_file_id=new_file_id)
+            db.session.add(new_record)
+            db.session.commit()
+            logger.info(f"Nuevo registro de ID de archivo creado en la base de datos: {new_file_id}")
+
+        return jsonify({
+            "success": True,
+            "message": "Archivo de conocimiento diario actualizado y gestionado exitosamente.",
+            "new_file_id": new_file_id
+        }), 200
+
+    except Exception as e:
+        logger.error("Error en la gestión del archivo de conocimiento diario para OpenAI", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+    finally:
+        # --- Limpiar archivo temporal SIEMPRE ---
+        # Este bloque se ejecuta SIEMPRE, haya error o no.
+        if tmpfile_path and os.path.exists(tmpfile_path):
+            try:
+                os.remove(tmpfile_path)
+                logger.info(f"Archivo temporal '{tmpfile_path}' eliminado.")
+            except PermissionError as pe:
+                # Si aún hay un error de permiso aquí, se loguea pero no se re-levanta
+                # porque la función principal ya retornó un error o éxito.
+                logger.error(f"Error de permiso al intentar eliminar el archivo temporal en el finally block: {pe}")
+            except Exception as final_e:
+                logger.error(f"Error inesperado al eliminar el archivo temporal en el finally block: {final_e}")

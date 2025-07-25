@@ -404,56 +404,43 @@ class QuintoSurveySql(db.Model):
     __tablename__ = 'quinto_survey_sql'
 
     id = db.Column(db.Integer, primary_key=True)
-    id_concat = db.Column(db.String(255), unique=True, nullable=False)  # antes era "ID"
-    date_created             = db.Column(db.DateTime, nullable=True)
-    gestores_aprendizaje     = db.Column('GestoresAprendizaje', db.String(255), nullable=True, default="")
-    curso                    = db.Column('Curso', db.String(255), nullable=True, default="")
-    recomendacion_colega     = db.Column(
-        '¿Qué tan probable es que usted le recomiende este curso a un colega?',
-        db.String(255), nullable=True, default=""
-    )
-    desempeno_instructor     = db.Column(
-        'De acuerdo a tu experiencia del día de hoy, ¿Cómo calificarías el desempeño del instructor?',
-        db.String(255), nullable=True, default=""
-    )
-    calificacion_general     = db.Column(
-        'En líneas generales, ¿cómo calificarías a este curso/ actividad?',
-        db.String(255), nullable=True, default=""
-    )
-    duracion_curso           = db.Column(
-        'Pensando en los contenidos vistos, considerás que la duración del curso fue:',
-        db.String(255), nullable=True, default=""
-    )
-    info_recibida            = db.Column(
-        'En cuanto a la información recibida, considerás que es:',
-        db.String(255), nullable=True, default=""
-    )
-    claridad_temas           = db.Column(
-        'Los temas fueron tratados con claridad',
-        db.String(255), nullable=True, default=""
-    )
-    utilidad_contenido       = db.Column(
-        'El contenido visto es de utilidad para mi tarea',
-        db.String(255), nullable=True, default=""
-    )
-    ayudas_practica          = db.Column(
-        'Las explicaciones, guías, videos, etc. ayudan a poner en práctica lo visto en el curso',
-        db.String(255), nullable=True, default=""
-    )
-    actividades_refuerzo     = db.Column(
-        'Las actividades propuestas refuerzan lo aprendido',
-        db.String(255), nullable=True, default=""
-    )
-    experiencia_aprendizaje  = db.Column(
-        'En líneas generales dirías que tu experiencia de aprendizaje con este curso fue:',
-        db.String(255), nullable=True, default=""
-    )
-    sugerencias              = db.Column(
-        'Para finalizar dejamos este espacio para que nos dejes tus sugerencias o comentarios relacionados a este curso',
-        db.Text, nullable=True, default=""
-    )
-
+    id_concat = db.Column(db.String(255), unique=True, nullable=False)
+    date_created = db.Column(db.DateTime, nullable=True)
+    gestores_aprendizaje = db.Column('GestoresAprendizaje', db.String(255), nullable=True, default="")
+    curso = db.Column('Curso', db.String(255), nullable=True, default="")
+    recomendacion_colega = db.Column('¿Qué tan probable es que usted le recomiende este curso a un colega?', db.String(255), nullable=True, default="")
+    desempeno_instructor = db.Column('De acuerdo a tu experiencia del día de hoy, ¿Cómo calificarías el desempeño del instructor?', db.String(255), nullable=True, default="")
+    calificacion_general = db.Column('En líneas generales, ¿cómo calificarías a este curso/ actividad?', db.String(255), nullable=True, default="")
+    duracion_curso = db.Column('Pensando en los contenidos vistos, considerás que la duración del curso fue:', db.String(255), nullable=True, default="")
+    info_recibida = db.Column('En cuanto a la información recibida, considerás que es:', db.String(255), nullable=True, default="")
+    claridad_temas = db.Column('Los temas fueron tratados con claridad', db.String(255), nullable=True, default="")
+    utilidad_contenido = db.Column('El contenido visto es de utilidad para mi tarea', db.String(255), nullable=True, default="")
+    ayudas_practica = db.Column('Las explicaciones, guías, videos, etc. ayudan a poner en práctica lo visto en el curso', db.String(255), nullable=True, default="")
+    actividades_refuerzo = db.Column('Las actividades propuestas refuerzan lo aprendido', db.String(255), nullable=True, default="")
+    experiencia_aprendizaje = db.Column('En líneas generales dirías que tu experiencia de aprendizaje con este curso fue:', db.String(255), nullable=True, default="")
+    sugerencias = db.Column('Para finalizar dejamos este espacio para que nos dejes tus sugerencias o comentarios relacionados a este curso', db.Text, nullable=True, default="")
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def serialize(self):
+        return {
+            'id': self.id,
+            'id_concat': self.id_concat,
+            'date_created': self.date_created.isoformat() if self.date_created else None,
+            'gestores_aprendizaje': self.gestores_aprendizaje,
+            'curso': self.curso,
+            'recomendacion_colega': self.recomendacion_colega,
+            'desempeno_instructor': self.desempeno_instructor,
+            'calificacion_general': self.calificacion_general,
+            'duracion_curso': self.duracion_curso,
+            'info_recibida': self.info_recibida,
+            'claridad_temas': self.claridad_temas,
+            'utilidad_contenido': self.utilidad_contenido,
+            'ayudas_practica': self.ayudas_practica,
+            'actividades_refuerzo': self.actividades_refuerzo,
+            'experiencia_aprendizaje': self.experiencia_aprendizaje,
+            'sugerencias': self.sugerencias,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
 
     def __repr__(self):
         return f"<QuintoSurveySql(id_concat={self.id_concat}, curso={self.curso})>"
@@ -462,60 +449,43 @@ class CuartoSurveySql(db.Model):
     __tablename__ = 'cuarto_survey_sql'
 
     id         = db.Column(db.Integer, primary_key=True)
-    id_code    = db.Column('ID_CODE', db.String(255), nullable=True)  # si lo querés seguir guardando
-    id_concat  = db.Column(db.String(512), unique=True, nullable=False)  # date_modified + ip_address
+    id_code    = db.Column('ID_CODE', db.String(255), nullable=True)
+    id_concat  = db.Column(db.String(512), unique=True, nullable=False)
 
-    # tus campos de encuesta...
-    recomendacion_colega    = db.Column(
-        '¿Qué tan probable es que usted le recomiende este curso a un colega?',
-        db.String(255), nullable=True, default=""
-    )
-    calificacion_general    = db.Column(
-        'En líneas generales, ¿cómo calificarías a este curso/ actividad?',
-        db.String(255), nullable=True, default=""
-    )
-    duracion_curso          = db.Column(
-        'Pensando en los contenidos vistos, considerás que la duración del curso fue:',
-        db.String(255), nullable=True, default=""
-    )
-    info_recibida           = db.Column(
-        'En cuanto a la información recibida, considerás que es:',
-        db.String(255), nullable=True, default=""
-    )
-    claridad_temas          = db.Column(
-        'Los temas fueron tratados con claridad',
-        db.String(255), nullable=True, default=""
-    )
-    utilidad_contenido      = db.Column(
-        'El contenido visto es de utilidad para mi tarea',
-        db.String(255), nullable=True, default=""
-    )
-    ayudas_practica         = db.Column(
-        'Las explicaciones, guías, videos, etc. ayudan a poner en práctica lo visto en el curso',
-        db.String(255), nullable=True, default=""
-    )
-    actividades_refuerzo    = db.Column(
-        'Las actividades propuestas refuerzan lo aprendido',
-        db.String(255), nullable=True, default=""
-    )
-    problema_campus         = db.Column(
-        'Al momento de realizar el curso, ¿tuviste algún problema con el Campus de aprendizaje?',
-        db.String(255), nullable=True, default=""
-    )
-    detalle_problema        = db.Column(
-        'Si tuviste algún problema, por favor, contanos que sucedió',
-        db.Text, nullable=True, default=""
-    )
-    experiencia_aprendizaje = db.Column(
-        'En líneas generales dirías que tu experiencia de aprendizaje con este curso fue:',
-        db.String(255), nullable=True, default=""
-    )
-    sugerencias             = db.Column(
-        'Para finalizar dejamos este espacio para que nos dejes tus sugerencias o comentarios relacionados a este curso',
-        db.Text, nullable=True, default=""
-    )
+    recomendacion_colega    = db.Column('¿Qué tan probable es que usted le recomiende este curso a un colega?', db.String(255), nullable=True, default="")
+    calificacion_general    = db.Column('En líneas generales, ¿cómo calificarías a este curso/ actividad?', db.String(255), nullable=True, default="")
+    duracion_curso          = db.Column('Pensando en los contenidos vistos, considerás que la duración del curso fue:', db.String(255), nullable=True, default="")
+    info_recibida           = db.Column('En cuanto a la información recibida, considerás que es:', db.String(255), nullable=True, default="")
+    claridad_temas          = db.Column('Los temas fueron tratados con claridad', db.String(255), nullable=True, default="")
+    utilidad_contenido      = db.Column('El contenido visto es de utilidad para mi tarea', db.String(255), nullable=True, default="")
+    ayudas_practica         = db.Column('Las explicaciones, guías, videos, etc. ayudan a poner en práctica lo visto en el curso', db.String(255), nullable=True, default="")
+    actividades_refuerzo    = db.Column('Las actividades propuestas refuerzan lo aprendido', db.String(255), nullable=True, default="")
+    problema_campus         = db.Column('Al momento de realizar el curso, ¿tuviste algún problema con el Campus de aprendizaje?', db.String(255), nullable=True, default="")
+    detalle_problema        = db.Column('Si tuviste algún problema, por favor, contanos que sucedió', db.Text, nullable=True, default="")
+    experiencia_aprendizaje = db.Column('En líneas generales dirías que tu experiencia de aprendizaje con este curso fue:', db.String(255), nullable=True, default="")
+    sugerencias             = db.Column('Para finalizar dejamos este espacio para que nos dejes tus sugerencias o comentarios relacionados a este curso', db.Text, nullable=True, default="")
 
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def serialize(self):
+        return {
+            'id': self.id,
+            'id_code': self.id_code,
+            'id_concat': self.id_concat,
+            'recomendacion_colega': self.recomendacion_colega,
+            'calificacion_general': self.calificacion_general,
+            'duracion_curso': self.duracion_curso,
+            'info_recibida': self.info_recibida,
+            'claridad_temas': self.claridad_temas,
+            'utilidad_contenido': self.utilidad_contenido,
+            'ayudas_practica': self.ayudas_practica,
+            'actividades_refuerzo': self.actividades_refuerzo,
+            'problema_campus': self.problema_campus,
+            'detalle_problema': self.detalle_problema,
+            'experiencia_aprendizaje': self.experiencia_aprendizaje,
+            'sugerencias': self.sugerencias,
+            'created_at': self.created_at.isoformat() if self.created_at else None
+        }
 
     def __repr__(self):
         return f"<CuartoSurveySql(id_concat={self.id_concat})>"
@@ -738,15 +708,34 @@ class BaseLoopEstaciones(db.Model):
     latitud = db.Column('Latitud', db.String(255))
     longitud = db.Column('Longitud', db.String(255))
 
-
-
-
-
     def serialize(self):
-        return {col.name: getattr(self, col.name) for col in self.__table__.columns}
+        data = {}
+        for col in self.__table__.columns:
+            # Convierte el nombre de la columna DB a un formato de atributo Python (snake_case)
+            # Ej: 'Id' -> 'id', 'Direccion Admin.' -> 'direccion_admin'
+            attr_name = col.name.replace(" ", "_").replace(".", "").lower()
+
+            # Caso especial para 'uid' (siempre debe ser 'uid')
+            if col.name == 'uid':
+                attr_name = 'uid'
+            
+            # Intenta obtener el valor del atributo usando el nombre del atributo Python
+            if hasattr(self, attr_name):
+                data[col.name] = getattr(self, attr_name)
+            else:
+                # Si el mapeo automático falla (ej. por alguna columna con un nombre muy particular),
+                # intenta usar el nombre de la columna de la DB directamente como atributo (menos común)
+                # O puedes decidir no incluirlo o asignar None
+                if hasattr(self, col.name):
+                    data[col.name] = getattr(self, col.name)
+                else:
+                    # Si no se encuentra el atributo por ninguna convención, se asigna None
+                    data[col.name] = None 
+        return data
 
     def __repr__(self):
-        return f"<DatosOperativos2025 id={self.id}>"
+        # Asegúrate de usar self.id (el atributo Python) aquí.
+        return f"<BaseLoopEstaciones id={self.id}>"
     
 class FichasGoogleCompetencia(db.Model):
     __tablename__ = 'fichas_google_competencia'
@@ -761,6 +750,18 @@ class FichasGoogleCompetencia(db.Model):
     def generar_hash(id_loop, total_review_count, average_rating):
         texto = f"{id_loop}|{total_review_count}|{average_rating}"
         return hashlib.md5(texto.encode('utf-8')).hexdigest()
+
+    def serialize(self):
+        return {
+            'id': self.id,
+            'id_loop': self.id_loop,
+            'total_review_count': self.total_review_count,
+            'average_rating': self.average_rating,
+            'hash_id': self.hash_id
+        }
+
+    def __repr__(self):
+        return f"<FichasGoogleCompetencia id={self.id} id_loop={self.id_loop}>"
     
 class FichasGoogle(db.Model):
     __tablename__ = 'fichas_google'
@@ -775,6 +776,18 @@ class FichasGoogle(db.Model):
     def generar_hash(store_code, cantidad_de_calificaciones, start_rating):
         texto = f"{store_code}|{cantidad_de_calificaciones}|{start_rating}"
         return hashlib.md5(texto.encode('utf-8')).hexdigest()
+
+    def serialize(self):
+        return {
+            'id': self.id,
+            'store_code': self.store_code,
+            'cantidad_de_calificaciones': self.cantidad_de_calificaciones,
+            'start_rating': self.start_rating,
+            'hash_id': self.hash_id
+        }
+
+    def __repr__(self):
+        return f"<FichasGoogle id={self.id} store_code={self.store_code}>"
     
 class SalesForce(db.Model):
     __tablename__ = 'salesforce'
@@ -802,6 +815,31 @@ class SalesForce(db.Model):
     def generar_hash(*args):
         texto = '|'.join(str(arg).strip() for arg in args)
         return hashlib.md5(texto.encode('utf-8')).hexdigest()
+
+    def serialize(self):
+        return {
+            'id': self.id,
+            'estacion_servicio_zona': self.estacion_servicio_zona,
+            'numero_de_caso': self.numero_de_caso,
+            'estado': self.estado,
+            'tipificacion_caso': self.tipificacion_caso,
+            'asunto': self.asunto,
+            'fecha_apertura': self.fecha_apertura,
+            'cantidad_reclamos': self.cantidad_reclamos,
+            'defensa_consumidor': self.defensa_consumidor,
+            'ggrr_cola_asignado': self.ggrr_cola_asignado,
+            'propietario_nombre': self.propietario_nombre,
+            'descripcion': self.descripcion,
+            'contacto_nombre': self.contacto_nombre,
+            'comentarios': self.comentarios,
+            'razon_social': self.razon_social,
+            'red': self.red,
+            'regional': self.regional,
+            'hash_id': self.hash_id
+        }
+
+    def __repr__(self):
+        return f"<SalesForce id={self.id} numero_de_caso={self.numero_de_caso}>"
     
 class ComentariosCompetencia(db.Model):
     __tablename__ = 'comentarios_competencia'
@@ -820,3 +858,29 @@ class ComentariosCompetencia(db.Model):
     def generar_hash(id_original, fecha, id_loop, comentario, rating, sentimiento, topico):
         texto = f"{id_original}|{fecha}|{id_loop}|{comentario}|{rating}|{sentimiento}|{topico}"
         return hashlib.md5(texto.encode('utf-8')).hexdigest()
+
+    def serialize(self):
+        return {
+            'id': self.id,
+            'id_original': self.id_original,
+            'fecha': self.fecha,
+            'id_loop': self.id_loop,
+            'comentario': self.comentario,
+            'rating': self.rating,
+            'sentimiento': self.sentimiento,
+            'topico': self.topico,
+            'hash_id': self.hash_id
+        }
+
+    def __repr__(self):
+        return f"<ComentarioCompetencia id={self.id} id_loop={self.id_loop}>"
+    
+
+
+    # ---------------------------------------------------ACTUALIZAR DATOS DE THREAD---------------------------------------->
+
+class FileDailyID(db.Model): # Si usas Flask-SQLAlchemy
+    __tablename__ = 'file_daily_id'
+    id = db.Column(db.Integer, primary_key=True)
+    current_file_id = db.Column(db.String, unique=True, nullable=False)
+    timestamp = db.Column(db.DateTime, default=db.func.current_timestamp()) # Para llevar un registro de cuándo se actualizó
