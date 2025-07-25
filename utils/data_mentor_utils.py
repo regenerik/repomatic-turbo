@@ -26,14 +26,6 @@ ASSISTANT_ID = os.environ.get("OPENAI_ASSISTANT_ID", "asst_Gy0OKzAqKGqXiU25q9Z89
 client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
 def query_assistant_mentor(prompt: str, thread_id: Optional[str] = None) -> Tuple[str, str]:
-    """
-    Envía un prompt al asistente con ID ASSISTANT_ID utilizando la API de OpenAI,
-    adjuntando el archivo de conocimiento diario.
-    - Si NO hay thread_id => se crea un nuevo hilo y se adjunta el archivo.
-    - Si SÍ hay thread_id => se continúa el hilo existente y se adjunta el archivo al nuevo mensaje.
-    
-    Espera a que el run se complete y devuelve (respuesta_del_asistente, thread_id).
-    """
     logger.info('Entró al util query_assistant_mentor')
     
     # 1. Obtener el ID del archivo de conocimiento diario más reciente
@@ -43,10 +35,8 @@ def query_assistant_mentor(prompt: str, thread_id: Optional[str] = None) -> Tupl
         raise RuntimeError("No se encontró la base de conocimiento diaria. Por favor, asegúrese de ejecutar la ruta de actualización de archivos.")
     
     current_knowledge_file_id = daily_file_record.current_file_id
-    logger.info(f"Usando archivo de conocimiento con ID: {current_knowledge_file_id}")
+    logger.info(f"Usando archivo de conocimiento con ID recuperado de DB: {current_knowledge_file_id}")
 
-    messages_to_add = [{"role": "user", "content": prompt}]
-    
     # Configuración de los adjuntos para el mensaje
     attachments = [
         {
@@ -60,6 +50,9 @@ def query_assistant_mentor(prompt: str, thread_id: Optional[str] = None) -> Tupl
     try:
         if not current_thread_id:
             logger.info('thread_id vino SIN contenido (charla nueva). Creando un nuevo hilo...')
+            # --- LOG DE VERIFICACIÓN 1: Antes de crear el nuevo hilo con adjunto ---
+            logger.info(f"DEBUG: Creando nuevo Thread. Adjuntando file_id: {current_knowledge_file_id}")
+            
             # Crear un nuevo hilo y añadir el primer mensaje con el archivo adjunto
             thread = client.beta.threads.create(
                 messages=[
@@ -74,6 +67,9 @@ def query_assistant_mentor(prompt: str, thread_id: Optional[str] = None) -> Tupl
             logger.info(f"Nuevo Thread creado con ID: {current_thread_id}")
         else:
             logger.info(f"thread_id vino con contenido. Continuar hilo existente: {current_thread_id}...")
+            # --- LOG DE VERIFICACIÓN 2: Antes de añadir el mensaje al hilo existente con adjunto ---
+            logger.info(f"DEBUG: Añadiendo mensaje a Thread existente. Adjuntando file_id: {current_knowledge_file_id}")
+            
             # Añadir el mensaje al hilo existente con el archivo adjunto
             client.beta.threads.messages.create(
                 thread_id=current_thread_id,
