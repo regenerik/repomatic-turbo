@@ -687,14 +687,12 @@ def cargar_comentarios_competencia():
 
 @data_mentor_bp.route("/actualizar-archivos-asistente", methods=["POST"])
 def actualizar_archivos_asistente():
-    tmpfile_path = None # Inicializar a None para asegurar que siempre se borre si existe
+    tmpfile_path = None
     try:
         logger.info("Iniciando el proceso de actualización del archivo de conocimiento diario para OpenAI.")
-
-        # --- 1. Recopilar datos de todas las tablas y generar JSON temporal ---
         logger.info("Recopilando datos de todas las tablas...")
 
-        # Recuperación de los datos de todas las tablas
+        # --- 1. Recopilar datos de todas las tablas ---
         comentarios_2025 = Comentarios2025.query.all()
         fichas_google = FichasGoogle.query.all()
         fichas_google_competencia = FichasGoogleCompetencia.query.all()
@@ -714,8 +712,87 @@ def actualizar_archivos_asistente():
         sales_force = SalesForce.query.all()
         comentarios_competencia = ComentariosCompetencia.query.all()
 
-        # Creación del diccionario JSON con todos los datos serializados
+        # --- Creación del diccionario JSON con la guía de uso y los datos ---
         data_json = {
+            "guia_de_uso_de_datos": {
+                "descripcion_general": "Este archivo contiene una base de conocimiento integral sobre las operaciones, experiencia del cliente y aprendizaje comercial de nuestra empresa. El objetivo es proporcionar información detallada para análisis, resolución de consultas y comparación con la competencia. La tabla 'base_loop_estaciones' es central para la mayoría de las relaciones.",
+                "secciones_disponibles": {
+                    "base_loop_estaciones": {
+                        "descripcion": "Tabla PRINCIPAL. Contiene el detalle exhaustivo de cada estación de servicio. Incluye información operativa (volúmenes de venta, tipo de establecimiento, dotación, etc.), geográfica y administrativa. Sus campos 'APIES' e 'Id' son claves para relacionarla con otras secciones.",
+                        "relaciones_clave": {
+                            "BaseLoopEstaciones.APIES": "Se relaciona con 'comentarios_2023.APIES', 'comentarios_2024.APIES', 'comentarios_2025.APIES'.",
+                            "BaseLoopEstaciones.Id": "Se relaciona con 'fichas_google.Store_Code', 'fichas_google_competencia.Idloop', 'comentarios_competencia.Idloop', 'usuarios_por_asignacion.ID_Pertenencia'."
+                        },
+                        "ejemplo_consulta": "Para la estación con ID 1234, ¿cuál es su volumen promedio de Nafta y qué comentarios de clientes tiene de 2025?"
+                    },
+                    "comentarios_2023": {
+                        "descripcion": "Comentarios de encuestas de clientes recibidos en 2023. Incluye 'fecha', 'apies' (ID de estación), 'comentario' (texto libre), 'canal', 'topico', 'sentiment'.",
+                        "relaciones_clave": "Relacionado con 'base_loop_estaciones' mediante 'APIES'.",
+                        "ejemplo_consulta": "¿Qué comentarios positivos hubo en la estación 5678 en 2023 sobre la atención?"
+                    },
+                    "comentarios_2024": {
+                        "descripcion": "Comentarios de encuestas de clientes recibidos en 2024. Formato y campos similares a 2023.",
+                        "relaciones_clave": "Relacionado con 'base_loop_estaciones' mediante 'APIES'.",
+                        "ejemplo_consulta": "Dame los tópicos más frecuentes en los comentarios negativos de 2024 para la región 'Norte'."
+                    },
+                    "comentarios_2025": {
+                        "descripcion": "Comentarios de encuestas de clientes recibidos en 2025. Formato y campos similares a 2023 y 2024.",
+                        "relaciones_clave": "Relacionado con 'base_loop_estaciones' mediante 'APIES'.",
+                        "ejemplo_consulta": "¿Cuáles son los comentarios recientes (2025) sobre el 'precio' en estaciones de Capital Federal?"
+                    },
+                    "fichas_google": {
+                        "descripcion": "Datos de nuestras fichas de Google (reseñas, valoraciones, información de la estación). Contiene 'Store_Code' que es el ID de la estación.",
+                        "relaciones_clave": "Relacionado con 'base_loop_estaciones' mediante 'Store_Code' (que es igual a BaseLoopEstaciones.Id).",
+                        "ejemplo_consulta": "¿Cuál es la valoración promedio de las fichas de Google para las estaciones de Buenos Aires?"
+                    },
+                    "fichas_google_competencia": {
+                        "descripcion": "Datos de fichas de Google de la competencia. Permite analizar y comparar métricas y comentarios de nuestros rivales. Contiene 'Idloop' que es el ID de la estación asociada.",
+                        "relaciones_clave": "Relacionado con 'base_loop_estaciones' mediante 'Idloop' (que es igual a BaseLoopEstaciones.Id).",
+                        "ejemplo_consulta": "¿Qué comentarios negativos hay en las fichas de Google de la competencia sobre la 'velocidad de servicio'?"
+                    },
+                    "comentarios_competencia": {
+                        "descripcion": "**¡ATENCIÓN!** Esta sección contiene **comentarios textuales de clientes específicamente sobre nuestros competidores.** Busca aquí para analizar el tipo de feedback que reciben nuestros rivales en temas como precio, atención, calidad de producto, etc. Los campos incluyen 'competidor', 'comentario', 'sentimiento'.",
+                        "relaciones_clave": "Relacionado con 'base_loop_estaciones' mediante 'Idloop' (que es igual a BaseLoopEstaciones.Id).",
+                        "ejemplo_consulta": "Dame los comentarios negativos de la competencia sobre el precio en el último mes."
+                    },
+                    "usuarios_por_asignacion": {
+                        "descripcion": "Detalles sobre la asignación de usuarios a estaciones. 'ID_Pertenencia' corresponde al ID de la estación en BaseLoopEstaciones.",
+                        "relaciones_clave": "Relacionado con 'base_loop_estaciones' mediante 'ID_Pertenencia' (que es igual a BaseLoopEstaciones.Id).",
+                        "ejemplo_consulta": "¿Cuántos usuarios están asignados a la estación con ID 1234 y cuál es su tipo de operador?"
+                    },
+                    "usuarios_sin_id": {
+                        "descripcion": "Información sobre usuarios que no tienen un ID de sistema asignado."
+                    },
+                    "valida_usuarios": {
+                        "descripcion": "Datos utilizados para la validación de usuarios."
+                    },
+                    "detalle_apies": {
+                        "descripcion": "Detalle de identificadores de APIES."
+                    },
+                    "avance_cursada": {
+                        "descripcion": "Seguimiento del progreso de los usuarios en cursos específicos. Contiene 'ID_Usuario' y 'ID_Curso'."
+                    },
+                    "detalles_de_cursos": {
+                        "descripcion": "Información detallada sobre los cursos disponibles, como nombre del curso, duración, etc. 'ID_Curso' es la clave."
+                    },
+                    "cursadas_agrupadas": {
+                        "descripcion": "Resumen o agrupación de datos de cursadas."
+                    },
+                    "formulario_gestor": {
+                        "descripcion": "Datos recopilados de formularios gestionados."
+                    },
+                    "cuarto_survey_sql": {
+                        "descripcion": "Resultados de la Cuarta Encuesta SQL."
+                    },
+                    "quinto_survey_sql": {
+                        "descripcion": "Resultados de la Quinta Encuesta SQL."
+                    },
+                    "sales_force": {
+                        "descripcion": "Datos provenientes de SalesForce, relacionados con ventas o gestión de relaciones con clientes."
+                    }
+                },
+                "instrucciones_especificas_para_ia": "Cuando un usuario haga una pregunta, primero identifica la sección más relevante en este documento. Si la pregunta requiere combinar información de diferentes secciones (ej. 'comentarios' con 'base_loop_estaciones'), utiliza las 'relaciones_clave' indicadas en cada sección para entender cómo se vinculan. Por ejemplo, para obtener comentarios de una estación específica, usa el campo 'APIES' de los comentarios y de 'base_loop_estaciones'. Siempre correlaciona la pregunta del usuario con la sección del JSON que contenga la información más probable. Si la información no está disponible en una sección o en la mezcla de dos o mas secciones por medio de joins de tablas, indícalo claramente. Proporciona respuestas claras, concisas y directas, citando la sección del documento de donde proviene la información si es necesario."
+            },
             "comentarios_2025": [c.serialize() for c in comentarios_2025],
             "fichas_google": [f.serialize() for f in fichas_google],
             "fichas_google_competencia": [f.serialize() for f in fichas_google_competencia],
@@ -739,53 +816,40 @@ def actualizar_archivos_asistente():
         # Crear un archivo JSON temporal para escribir los datos
         with NamedTemporaryFile(mode="w+", delete=False, suffix=".json", encoding="utf-8") as tmpfile:
             json.dump(data_json, tmpfile, indent=2, ensure_ascii=False)
-            tmpfile.flush() # Asegura que todos los datos se escriban en el disco
+            tmpfile.flush()
             tmpfile_path = tmpfile.name
-        # En este punto, el primer handle del archivo (el de escritura) ya está cerrado.
-
+        
         file_size = os.path.getsize(tmpfile_path) / (1024 * 1024)
         logger.info(f"Tamaño final del archivo JSON temporal: {file_size:.2f} MB")
 
         # --- 2. Subir el nuevo archivo JSON a OpenAI ---
         logger.info("Subiendo el nuevo archivo JSON a OpenAI...")
-        # Abrir el archivo DE NUEVO, pero esta vez solo para lectura binaria,
-        # y usar un bloque 'with' para asegurar que se cierre inmediatamente
-        # después de que la API de OpenAI lo lea.
         with open(tmpfile_path, "rb") as file_to_upload:
             uploaded_file = client.files.create(
-                file=file_to_upload, # Pasa el objeto de archivo abierto
-                purpose="assistants" # Propósito para uso con Assistants y File Search
+                file=file_to_upload,
+                purpose="assistants"
             )
-        # Aquí, el 'file_to_upload' está garantizado de ser cerrado.
-
         new_file_id = uploaded_file.id
         logger.info(f"Nuevo archivo JSON subido con éxito. File ID: {new_file_id}")
 
         # --- 3. Eliminar archivo existente previamente de OpenAI (si lo hay) ---
-        # Buscamos el registro del file_id del día anterior en nuestra DB
-        existing_file_record = FileDailyID.query.first() # Suponemos que solo guardas 1 ID actual
+        existing_file_record = FileDailyID.query.first()
 
         if existing_file_record:
             old_file_id = existing_file_record.current_file_id
             logger.info(f"Se encontró un archivo antiguo para eliminar con ID: {old_file_id}")
             try:
-                # Intenta eliminar el archivo de OpenAI
                 client.files.delete(old_file_id)
                 logger.info(f"Archivo antiguo '{old_file_id}' eliminado exitosamente de OpenAI.")
             except Exception as e:
-                # Es posible que el archivo ya no exista (ej. borrado manual o por un error anterior)
-                # Registra el warning, pero no detengas el proceso, ya que el objetivo es asegurar
-                # que el nuevo archivo sea el que esté disponible.
                 logger.warning(f"No se pudo eliminar el archivo antiguo '{old_file_id}' de OpenAI. Causa: {e}")
             
-            # Actualiza el registro existente en tu DB con el nuevo file_id
             existing_file_record.current_file_id = new_file_id
-            db.session.add(existing_file_record) # Opcional, pero explícito para algunos ORMs
+            db.session.add(existing_file_record)
             db.session.commit()
             logger.info(f"ID de archivo actualizado en la base de datos a: {new_file_id}")
         else:
             logger.info("No se encontró un archivo anterior registrado en la base de datos.")
-            # Si no hay registro, crea uno nuevo para el file_id actual
             new_record = FileDailyID(current_file_id=new_file_id)
             db.session.add(new_record)
             db.session.commit()
@@ -801,15 +865,11 @@ def actualizar_archivos_asistente():
         logger.error("Error en la gestión del archivo de conocimiento diario para OpenAI", exc_info=True)
         return jsonify({"error": str(e)}), 500
     finally:
-        # --- Limpiar archivo temporal SIEMPRE ---
-        # Este bloque se ejecuta SIEMPRE, haya error o no.
         if tmpfile_path and os.path.exists(tmpfile_path):
             try:
                 os.remove(tmpfile_path)
                 logger.info(f"Archivo temporal '{tmpfile_path}' eliminado.")
             except PermissionError as pe:
-                # Si aún hay un error de permiso aquí, se loguea pero no se re-levanta
-                # porque la función principal ya retornó un error o éxito.
                 logger.error(f"Error de permiso al intentar eliminar el archivo temporal en el finally block: {pe}")
             except Exception as final_e:
                 logger.error(f"Error inesperado al eliminar el archivo temporal en el finally block: {final_e}")
