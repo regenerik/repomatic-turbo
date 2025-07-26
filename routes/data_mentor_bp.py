@@ -733,7 +733,27 @@ def actualizar_archivos_asistente():
 
         # --- Creación del diccionario JSON final ---
         data_json = {
-            "descripcion_contenido_archivo": "Este archivo JSON contiene datos operativos y de experiencia del cliente de YPF, organizados por sección. Cada sección (ej., 'comentarios_2025', 'base_loop_estaciones') incluye un campo 'total_registros' y los 'datos' detallados.",
+            "descripcion_contenido_archivo": "Este archivo JSON contiene datos operativos y de experiencia del cliente de YPF, organizados por sección. Cada sección (ej., 'comentarios_2025', 'base_loop_estaciones') incluye un campo 'total_registros' y los 'datos' detallados. Se incluye una sección 'resumen_conteos_totales' para acceso directo a los conteos por sección.",
+            "resumen_conteos_totales": { # <--- ¡NUEVA SECCIÓN AGREGADA AQUÍ!
+                "comentarios_2025": comentarios_2025_count,
+                "fichas_google": fichas_google_count,
+                "fichas_google_competencia": fichas_google_competencia_count,
+                "usuarios_por_asignacion": usuarios_por_asignacion_count,
+                "usuarios_sin_id": usuarios_sin_id_count,
+                "valida_usuarios": valida_usuarios_count,
+                "detalle_apies": detalle_apies_count,
+                "avance_cursada": avance_cursada_count,
+                "detalles_de_cursos": detalles_de_cursos_count,
+                "cursadas_agrupadas": cursadas_agrupadas_count,
+                "formulario_gestor": formulario_gestor_count,
+                "cuarto_survey_sql": cuarto_survey_sql_count,
+                "quinto_survey_sql": quinto_survey_sql_count,
+                "comentarios_2023": comentarios_2023_count,
+                "comentarios_2024": comentarios_2024_count,
+                "base_loop_estaciones": base_loop_estaciones_count,
+                "sales_force": sales_force_count,
+                "comentarios_competencia": comentarios_competencia_count
+            },
             "comentarios_2025": {
                 "total_registros": comentarios_2025_count,
                 "datos": comentarios_2025_serialized
@@ -855,8 +875,8 @@ def actualizar_archivos_asistente():
             "success": True,
             "message": "Archivo de conocimiento diario actualizado y gestionado exitosamente.",
             "new_file_id": new_file_id,
-            "final_file_size_mb": round(file_size, 4), # Añadimos el tamaño del archivo final
-            "contenido_incluido": content_summary # Añadimos el resumen de contenido
+            "final_file_size_mb": round(file_size, 4), # <-- Tamaño del archivo final
+            "contenido_incluido": content_summary # <-- Resumen detallado del contenido
         }), 200
 
     except Exception as e:
