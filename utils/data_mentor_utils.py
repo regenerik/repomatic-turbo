@@ -50,7 +50,7 @@ def query_assistant_mentor(prompt: str, thread_id: Optional[str] = None) -> Tupl
     try:
         if not current_thread_id:
             logger.info('thread_id vino SIN contenido (charla nueva). Creando un nuevo hilo...')
-            # --- LOG DE VERIFICACIÓN 1: Antes de crear el nuevo hilo con adjunto ---
+            # LOG DE VERIFICACIÓN 1: Antes de crear el nuevo hilo con adjunto
             logger.info(f"DEBUG: Creando nuevo Thread. Adjuntando file_id: {current_knowledge_file_id}")
             
             # Crear un nuevo hilo y añadir el primer mensaje con el archivo adjunto
@@ -67,7 +67,7 @@ def query_assistant_mentor(prompt: str, thread_id: Optional[str] = None) -> Tupl
             logger.info(f"Nuevo Thread creado con ID: {current_thread_id}")
         else:
             logger.info(f"thread_id vino con contenido. Continuar hilo existente: {current_thread_id}...")
-            # --- LOG DE VERIFICACIÓN 2: Antes de añadir el mensaje al hilo existente con adjunto ---
+            # LOG DE VERIFICACIÓN 2: Antes de añadir el mensaje al hilo existente con adjunto
             logger.info(f"DEBUG: Añadiendo mensaje a Thread existente. Adjuntando file_id: {current_knowledge_file_id}")
             
             # Añadir el mensaje al hilo existente con el archivo adjunto
@@ -98,8 +98,15 @@ def query_assistant_mentor(prompt: str, thread_id: Optional[str] = None) -> Tupl
             logger.info(f"Estado del Run: {run.status}")
 
         if run.status != "completed":
-            logger.error(f"El run terminó con estado inesperado: '{run.status}'. Último Run ID: {run_id}")
-            raise RuntimeError(f"El asistente no pudo completar la solicitud. Estado: '{run.status}'.")
+            # --- CAMBIO AQUÍ: Extraer detalles del error si el run falló ---
+            error_message = f"El asistente no pudo completar la solicitud. Estado: '{run.status}'."
+            if run.last_error:
+                error_message += f" Código de error: {run.last_error.code}. Mensaje: {run.last_error.message}"
+                logger.error(f"Detalles del error del Run: Código={run.last_error.code}, Mensaje='{run.last_error.message}'")
+            else:
+                logger.error("El Run falló, pero no se encontraron detalles adicionales en 'last_error'.")
+            
+            raise RuntimeError(error_message) # Lanza el error con más detalles
 
         # Recuperar los mensajes del thread
         messages_page = client.beta.threads.messages.list(
