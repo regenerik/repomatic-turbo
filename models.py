@@ -2,6 +2,8 @@ from database import db
 from datetime import datetime
 import hashlib
 import uuid
+import json
+from logging_config import logger
 
 
 class User(db.Model):
@@ -69,11 +71,9 @@ class AllCommentsWithEvaluation(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     archivo_binario = db.Column(db.LargeBinary)
 
-
 class FilteredExperienceComments(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     archivo_binario = db.Column(db.LargeBinary)
-
 
 class DailyCommentsWithEvaluation(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -549,7 +549,6 @@ class Comentarios2024(db.Model):
     def __repr__(self):
         return f"<ComentarioEncuesta id={self.id} apies={self.apies}>"
 
-
 class Comentarios2025(db.Model):
     __tablename__ = 'comentarios_encuesta_2025'
 
@@ -589,7 +588,6 @@ class Comentarios2025(db.Model):
         texto = f"{fecha}|{apies}|{comentario}|{canal}"
         return hashlib.md5(texto.encode('utf-8')).hexdigest()
     
-
 class BaseLoopEstaciones(db.Model):
     __tablename__ = 'base_loop_estaciones'
 
@@ -879,8 +877,48 @@ class ComentariosCompetencia(db.Model):
 
     # ---------------------------------------------------ACTUALIZAR DATOS DE THREAD---------------------------------------->
 
+# CLASES PARA QUE FUNCIONE DATA MENTOR Y EL CHAT EN GENERAL >>  Y los modificables de la info extra que recibe la IA>>>>>
+
 class FileDailyID(db.Model): # Si usas Flask-SQLAlchemy
     __tablename__ = 'file_daily_id'
     id = db.Column(db.Integer, primary_key=True)
     current_file_id = db.Column(db.String, unique=True, nullable=False)
     timestamp = db.Column(db.DateTime, default=db.func.current_timestamp()) # Para llevar un registro de cuándo se actualizó
+
+
+class InstruccionesGenerales(db.Model):
+    __tablename__ = 'instrucciones_generales'
+    id = db.Column(db.Integer, primary_key=True)
+    descripcion_general = db.Column(db.Text, nullable=False)
+    instrucciones_especificas_para_ia = db.Column(db.Text, nullable=False)
+    # Puedes añadir un campo para saber cuándo fue la última actualización
+    last_updated = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<InstruccionesGenerales id={self.id}>"
+
+class InstruccionesIndividuales(db.Model):
+    __tablename__ = 'instrucciones_individuales'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(255), unique=True, nullable=False) # ej: "comentarios_2025", "base_loop_estaciones"
+    descripcion = db.Column(db.Text, nullable=False)
+    ejemplo_consulta = db.Column(db.Text, nullable=True) # Puede ser opcional
+    relaciones_clave = db.Column(db.Text, nullable=True) # Guardaremos esto como un JSON string
+    last_updated = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<InstruccionesIndividuales name='{self.name}'>"
+
+    def get_relaciones_clave_dict(self):
+        """Convierte el texto de relaciones_clave a un diccionario."""
+        if self.relaciones_clave:
+            try:
+                return json.loads(self.relaciones_clave)
+            except json.JSONDecodeError:
+                logger.error(f"Error al decodificar relaciones_clave para {self.name}: {self.relaciones_clave}")
+                return {}
+        return {}
+
+    def set_relaciones_clave_dict(self, data_dict):
+        """Convierte un diccionario a texto para guardar en relaciones_clave."""
+        self.relaciones_clave = json.dumps(data_dict, ensure_ascii=False)

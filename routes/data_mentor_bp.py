@@ -11,7 +11,7 @@ import urllib.request
 import urllib.error
 import json
 import pandas as pd
-from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas,FormularioGestor,CuartoSurveySql, QuintoSurveySql, Comentarios2023, Comentarios2024, Comentarios2025, BaseLoopEstaciones, FichasGoogleCompetencia, FichasGoogle, SalesForce, ComentariosCompetencia, FileDailyID
+from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas,FormularioGestor,CuartoSurveySql, QuintoSurveySql, Comentarios2023, Comentarios2024, Comentarios2025, BaseLoopEstaciones, FichasGoogleCompetencia, FichasGoogle, SalesForce, ComentariosCompetencia, FileDailyID, InstruccionesGenerales, InstruccionesIndividuales
 import hashlib
 from sqlalchemy.exc import SQLAlchemyError
 import csv
@@ -712,98 +712,86 @@ def actualizar_archivos_asistente():
         sales_force_data = SalesForce.query.all()
         comentarios_competencia_data = ComentariosCompetencia.query.all()
 
-        # --- Creación del diccionario JSON con la guía de uso y los datos ---
+        # --- CONSTRUCCIÓN DINÁMICA DE LA GUÍA DE USO DE DATOS DESDE LA DB ---
+        general_instructions = InstruccionesGenerales.query.first()
+        if not general_instructions:
+            raise RuntimeError("No se encontraron instrucciones generales en la base de datos. Por favor, cargue los datos en la tabla 'instrucciones_generales'.")
+
+        individual_instructions = InstruccionesIndividuales.query.all()
+        if not individual_instructions:
+            raise RuntimeError("No se encontraron instrucciones individuales en la base de datos. Por favor, cargue los datos en la tabla 'instrucciones_individuales'.")
+
+        secciones_disponibles_guide = {}
+        guide_text_parts = ["GUÍA DE USO DE LA BASE DE CONOCIMIENTO:\n"]
+        guide_text_parts.append(f"{general_instructions.descripcion_general}\n\n")
+        guide_text_parts.append("SECCIONES DISPONIBLES:\n")
+
+        # Mapeo de nombres de modelos a los nombres de claves en el JSON para InstruccionesIndividuales
+        # Asegúrate de que los 'name' en InstruccionesIndividuales coincidan con estas claves.
+        section_data_map = {
+            "comentarios_2025": comentarios_2025_data,
+            "fichas_google": fichas_google_data,
+            "fichas_google_competencia": fichas_google_competencia_data,
+            "usuarios_por_asignacion": usuarios_por_asignacion_data,
+            "usuarios_sin_id": usuarios_sin_id_data,
+            "valida_usuarios": valida_usuarios_data,
+            "detalle_apies": detalle_apies_data,
+            "avance_cursada": avance_cursada_data,
+            "detalles_de_cursos": detalles_de_cursos_data,
+            "cursadas_agrupadas": cursadas_agrupadas_data,
+            "formulario_gestor": formulario_gestor_data,
+            "cuarto_survey_sql": cuarto_survey_sql_data,
+            "quinto_survey_sql": quinto_survey_sql_data,
+            "comentarios_2023": comentarios_2023_data,
+            "comentarios_2024": comentarios_2024_data,
+            "base_loop_estaciones": base_loop_estaciones_data,
+            "sales_force": sales_force_data,
+            "comentarios_competencia": comentarios_competencia_data
+        }
+
+        for inst_ind in individual_instructions:
+            section_name = inst_ind.name
+            section_data = section_data_map.get(section_name, []) # Obtener los datos reales para calcular total_registros
+            
+            section_info_dict = {
+                "descripcion": inst_ind.descripcion,
+                "ejemplo_consulta": inst_ind.ejemplo_consulta
+            }
+            
+            relaciones = inst_ind.get_relaciones_clave_dict()
+            if relaciones:
+                section_info_dict["relaciones_clave"] = relaciones
+            
+            # Ajustar la descripción para el texto de la guía si incluye total_registros/datos
+            if section_data and hasattr(section_data, '__len__'): # Check if it's a list/collection
+                section_info_dict["descripcion"] += " Los datos reales están en 'datos' y el conteo total en 'total_registros'."
+                
+            secciones_disponibles_guide[section_name] = section_info_dict
+
+            # Construir la parte de texto para full_guide_text_for_ai
+            guide_text_parts.append(f"\n- Sección: '{section_name}'")
+            guide_text_parts.append(f"  Descripción: {section_info_dict['descripcion']}")
+            if relaciones:
+                guide_text_parts.append(f"  Relaciones Clave:")
+                for rel_key, rel_desc in relaciones.items():
+                    guide_text_parts.append(f"    - {rel_key}: {rel_desc}")
+            if inst_ind.ejemplo_consulta:
+                guide_text_parts.append(f"  Ejemplo de Consulta: {inst_ind.ejemplo_consulta}")
+
+        guide_text_parts.append("\nINSTRUCCIONES ESPECÍFICAS DE BÚSQUEDA PARA LA IA:")
+        guide_text_parts.append(general_instructions.instrucciones_especificas_para_ia)
+
+        full_guide_text_for_ai = "\n".join(guide_text_parts)
+        # FIN DE LA CONSTRUCCIÓN DE LA GUÍA DINÁMICA
+
+        # --- Creación del diccionario JSON final ---
         data_json = {
             "guia_de_uso_de_datos": {
-                "descripcion_general": "Este archivo contiene una base de conocimiento integral sobre las operaciones, experiencia del cliente y aprendizaje comercial de nuestra empresa. El objetivo es proporcionar información detallada para análisis, resolución de consultas y comparación con la competencia. La tabla 'base_loop_estaciones' es central para la mayoría de las relaciones. **Cada sección de datos ahora incluye un campo 'total_registros' para facilitar conteos directos, y los datos reales están bajo la clave 'datos'.**",
-                "secciones_disponibles": {
-                    "base_loop_estaciones": {
-                        "descripcion": "Tabla PRINCIPAL. Contiene el detalle exhaustivo de cada estación de servicio. Incluye información operativa (volúmenes de venta, tipo de establecimiento, dotación, etc.), geográfica y administrativa. Sus campos 'APIES' e 'Id' son claves para relacionarla con otras secciones. Los datos reales están en 'datos' y el conteo total en 'total_registros'.",
-                        "relaciones_clave": {
-                            "BaseLoopEstaciones.APIES": "Se relaciona con 'comentarios_2023.APIES', 'comentarios_2024.APIES', 'comentarios_2025.APIES'.",
-                            "BaseLoopEstaciones.Id": "Se relaciona con 'fichas_google.Store_Code', 'fichas_google_competencia.Idloop', 'comentarios_competencia.Idloop', 'usuarios_por_asignacion.ID_Pertenencia'."
-                        },
-                        "ejemplo_consulta": "Para la estación con ID 1234, ¿cuál es su volumen promedio de Nafta y qué comentarios de clientes tiene de 2025?"
-                    },
-                    "comentarios_2023": {
-                        "descripcion": "Comentarios de encuestas de clientes recibidos en 2023. Incluye 'fecha', 'apies' (ID de estación), 'comentario' (texto libre), 'canal', 'topico', 'sentiment'. Los datos reales están en 'datos' y el conteo total en 'total_registros'.",
-                        "relaciones_clave": "Relacionado con 'base_loop_estaciones' mediante 'APIES'.",
-                        "ejemplo_consulta": "¿Qué comentarios positivos hubo en la estación 5678 en 2023 sobre la atención?"
-                    },
-                    "comentarios_2024": {
-                        "descripcion": "Comentarios de encuestas de clientes recibidos en 2024. Formato y campos similares a 2023. Los datos reales están en 'datos' y el conteo total en 'total_registros'.",
-                        "relaciones_clave": "Relacionado con 'base_loop_estaciones' mediante 'APIES'.",
-                        "ejemplo_consulta": "Dame los tópicos más frecuentes en los comentarios negativos de 2024 para la región 'Norte'."
-                    },
-                    "comentarios_2025": {
-                        "descripcion": "Comentarios de encuestas de clientes recibidos en 2025. Formato y campos similares a 2023 y 2024. Los datos reales están en 'datos' y el conteo total en 'total_registros'.",
-                        "relaciones_clave": "Relacionado con 'base_loop_estaciones' mediante 'APIES'.",
-                        "ejemplo_consulta": "¿Cuáles son los comentarios recientes (2025) sobre el 'precio' en estaciones de Capital Federal?"
-                    },
-                    "fichas_google": {
-                        "descripcion": "Datos de nuestras fichas de Google (reseñas, valoraciones, información de la estación). Contiene 'Store_Code' que es el ID de la estación. Los datos reales están en 'datos' y el conteo total en 'total_registros'.",
-                        "relaciones_clave": "Relacionado con 'base_loop_estaciones' mediante 'Store_Code' (que es igual a BaseLoopEstaciones.Id).",
-                        "ejemplo_consulta": "¿Cuál es la valoración promedio de las fichas de Google para las estaciones de Buenos Aires?"
-                    },
-                    "fichas_google_competencia": {
-                        "descripcion": "Datos de fichas de Google de la competencia. Permite analizar y comparar métricas y comentarios de nuestros rivales. Contiene 'Idloop' que es el ID de la estación asociada. Los datos reales están en 'datos' y el conteo total en 'total_registros'.",
-                        "relaciones_clave": "Relacionado con 'base_loop_estaciones' mediante 'Idloop' (que es igual a BaseLoopEstaciones.Id).",
-                        "ejemplo_consulta": "¿Qué comentarios negativos hay en las fichas de Google de la competencia sobre la 'velocidad de servicio'?"
-                    },
-                    "comentarios_competencia": {
-                        "descripcion": "**¡ATENCIÓN!** Esta sección contiene **comentarios textuales de clientes específicamente sobre nuestros competidores.** Busca aquí para analizar el tipo de feedback que reciben nuestros rivales en temas como precio, atención, calidad de producto, etc. Los campos incluyen 'competidor', 'comentario', 'sentimiento'. Los datos reales están en 'datos' y el conteo total en 'total_registros'.",
-                        "relaciones_clave": "Relacionado con 'base_loop_estaciones' mediante 'Idloop' (que es igual a BaseLoopEstaciones.Id).",
-                        "ejemplo_consulta": "Dame los comentarios negativos de la competencia sobre el precio en el último mes."
-                    },
-                    "usuarios_por_asignacion": {
-                        "descripcion": "Detalles sobre la asignación de usuarios a estaciones. 'ID_Pertenencia' corresponde al ID de la estación en BaseLoopEstaciones. Los datos reales están en 'datos' y el conteo total en 'total_registros'.",
-                        "relaciones_clave": "Relacionado con 'base_loop_estaciones' mediante 'ID_Pertenencia' (que es igual a BaseLoopEstaciones.Id).",
-                        "ejemplo_consulta": "¿Cuántos usuarios están asignados a la estación con ID 1234 y cuál es su tipo de operador?"
-                    },
-                    "usuarios_sin_id": {
-                        "descripcion": "Información sobre usuarios que no tienen un ID de sistema asignado. Los datos reales están en 'datos' y el conteo total en 'total_registros'.",
-                        "relaciones_clave": "No hay una relación directa con BaseLoopEstaciones basada en IDs de estación."
-                    },
-                    "valida_usuarios": {
-                        "descripcion": "Datos utilizados para la validación de usuarios. Los datos reales están en 'datos' y el conteo total en 'total_registros'.",
-                        "relaciones_clave": "No hay una relación directa con BaseLoopEstaciones basada en IDs de estación."
-                    },
-                    "detalle_apies": {
-                        "descripcion": "Detalle de identificadores de APIES. Los datos reales están en 'datos' y el conteo total en 'total_registros'.",
-                        "relaciones_clave": "Contiene IDs de APIES, que pueden ser usados para correlacionar con BaseLoopEstaciones."
-                    },
-                    "avance_cursada": {
-                        "descripcion": "Seguimiento del progreso de los usuarios en cursos específicos. Contiene 'ID_Usuario' y 'ID_Curso'. Los datos reales están en 'datos' y el conteo total en 'total_registros'.",
-                        "relaciones_clave": "No hay una relación directa con BaseLoopEstaciones basada en IDs de estación."
-                    },
-                    "detalles_de_cursos": {
-                        "descripcion": "Información detallada sobre los cursos disponibles, como nombre del curso, duración, etc. 'ID_Curso' es la clave. Los datos reales están en 'datos' y el conteo total en 'total_registros'.",
-                        "relaciones_clave": "No hay una relación directa con BaseLoopEstaciones basada en IDs de estación."
-                    },
-                    "cursadas_agrupadas": {
-                        "descripcion": "Resumen o agrupación de datos de cursadas. Los datos reales están en 'datos' y el conteo total en 'total_registros'.",
-                        "relaciones_clave": "No hay una relación directa con BaseLoopEstaciones basada en IDs de estación."
-                    },
-                    "formulario_gestor": {
-                        "descripcion": "Datos recopilados de formularios gestionados. Los datos reales están en 'datos' y el conteo total en 'total_registros'.",
-                        "relaciones_clave": "No hay una relación directa con BaseLoopEstaciones basada en IDs de estación."
-                    },
-                    "cuarto_survey_sql": {
-                        "descripcion": "Resultados de la Cuarta Encuesta SQL. Los datos reales están en 'datos' y el conteo total en 'total_registros'.",
-                        "relaciones_clave": "No hay una relación directa con BaseLoopEstaciones basada en IDs de estación."
-                    },
-                    "quinto_survey_sql": {
-                        "descripcion": "Resultados de la Quinta Encuesta SQL. Los datos reales están en 'datos' y el conteo total en 'total_registros'.",
-                        "relaciones_clave": "No hay una relación directa con BaseLoopEstaciones basada en IDs de estación."
-                    },
-                    "sales_force": {
-                        "descripcion": "Datos provenientes de SalesForce, relacionados con ventas o gestión de relaciones con clientes. Los datos reales están en 'datos' y el conteo total en 'total_registros'.",
-                        "relaciones_clave": "No hay una relación directa con BaseLoopEstaciones basada en IDs de estación."
-                    }
-                },
-                "instrucciones_especificas_para_ia": "Cuando un usuario haga una pregunta, primero identifica la sección más relevante en este documento usando 'secciones_disponibles'. Cada sección de datos contiene un campo 'total_registros' con la cantidad total de entradas en esa sección, y los datos detallados se encuentran bajo la clave 'datos'. Si la pregunta requiere combinar información de diferentes secciones (ej. 'comentarios' con 'base_loop_estaciones'), utiliza las 'relaciones_clave' indicadas para vincularlas. Por ejemplo, para obtener comentarios de una estación específica, usa el campo 'APIES' de los comentarios y de 'base_loop_estaciones'. Siempre correlaciona la pregunta del usuario con la sección del JSON que contenga la información más probable. Si la información no está disponible en una sección o en la mezcla de dos o más secciones por medio de joins de tablas, indícalo claramente. Proporciona respuestas claras, concisas y directas, citando la sección del documento de donde proviene la información si es necesario."
+                "descripcion_general": general_instructions.descripcion_general,
+                "secciones_disponibles": secciones_disponibles_guide, # Usamos la guía construida dinámicamente
+                "instrucciones_especificas_para_ia": full_guide_text_for_ai # Usamos el texto de la guía construida
             },
-            # --- Aquí es donde aplicamos el nuevo formato a todas las secciones de datos ---
+            # --- Aquí aplicamos el nuevo formato {"total_registros": X, "datos": [...]} a TODAS las secciones de datos ---
             "comentarios_2025": {
                 "total_registros": len(comentarios_2025_data),
                 "datos": [c.serialize() for c in comentarios_2025_data]
@@ -910,15 +898,19 @@ def actualizar_archivos_asistente():
                 logger.warning(f"No se pudo eliminar el archivo antiguo '{old_file_id}' de OpenAI. Causa: {e}")
             
             existing_file_record.current_file_id = new_file_id
+            existing_file_record.usage_guide_text = full_guide_text_for_ai # <-- Guardar la guía
             db.session.add(existing_file_record)
             db.session.commit()
-            logger.info(f"ID de archivo actualizado en la base de datos a: {new_file_id}")
+            logger.info(f"ID de archivo y guía de uso actualizados en la base de datos a: {new_file_id}")
         else:
             logger.info("No se encontró un archivo anterior registrado en la base de datos.")
-            new_record = FileDailyID(current_file_id=new_file_id)
+            new_record = FileDailyID(
+                current_file_id=new_file_id,
+                usage_guide_text=full_guide_text_for_ai # <-- Guardar la guía
+            )
             db.session.add(new_record)
             db.session.commit()
-            logger.info(f"Nuevo registro de ID de archivo creado en la base de datos: {new_file_id}")
+            logger.info(f"Nuevo registro de ID de archivo y guía de uso creado en la base de datos: {new_file_id}")
 
         return jsonify({
             "success": True,

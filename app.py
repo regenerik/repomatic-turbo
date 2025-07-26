@@ -21,6 +21,7 @@ from routes.diarios_clasifica_sentimientos_bp import diarios_clasifica_sentimien
 from routes.clasifica_comentarios_individuales_bp import clasifica_comentarios_individuales_bp
 from routes.comentarios_necesidades_bp import comentarios_necesidades_bp
 from routes.comentarios_necesidades_final_bp import comentarios_necesidades_final_bp
+from initial_data_setup import carga_base_instrucciones_ia_data_mentor # Este es el que funciona para IA DATAMENTOR
 from database import db                             # Acá importamos la base de datos inicializada
 from flask_cors import CORS                         # Permisos de consumo
 from extensions import init_extensions              # Necesario para que funcione el executor en varios archivos en simultaneo
@@ -236,6 +237,7 @@ with app.app_context():
     cargar_todos_los_reportes_iniciales()  # Cargamos los reportes iniciales
     cargar_usuarios_iniciales()
     cargar_topicos_iniciales_si_no_existen()
+    carga_base_instrucciones_ia_data_mentor()
 
 # -----------------------
 
