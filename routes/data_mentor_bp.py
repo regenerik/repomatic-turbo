@@ -11,7 +11,7 @@ import urllib.request
 import urllib.error
 import json
 import pandas as pd
-from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas,FormularioGestor,CuartoSurveySql, QuintoSurveySql, Comentarios2023, Comentarios2024, Comentarios2025, BaseLoopEstaciones, FichasGoogleCompetencia, FichasGoogle, SalesForce, ComentariosCompetencia, FileDailyID, InstruccionesGenerales, InstruccionesIndividuales
+from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas,FormularioGestor,CuartoSurveySql, QuintoSurveySql, Comentarios2023, Comentarios2024, Comentarios2025, BaseLoopEstaciones, FichasGoogleCompetencia, FichasGoogle, SalesForce, ComentariosCompetencia, FileDailyID
 import hashlib
 from sqlalchemy.exc import SQLAlchemyError
 import csv
@@ -692,103 +692,119 @@ def actualizar_archivos_asistente():
         logger.info("Iniciando el proceso de actualización del archivo de conocimiento diario para OpenAI.")
         logger.info("Recopilando datos de todas las tablas...")
 
-        # --- 1. Recopilar datos de todas las tablas ---
-        comentarios_2025_data = Comentarios2025.query.all()
-        fichas_google_data = FichasGoogle.query.all()
-        fichas_google_competencia_data = FichasGoogleCompetencia.query.all()
-        usuarios_por_asignacion_data = Usuarios_Por_Asignacion.query.all()
-        usuarios_sin_id_data = Usuarios_Sin_ID.query.all()
-        valida_usuarios_data = ValidaUsuarios.query.all()
-        detalle_apies_data = DetalleApies.query.all()
-        avance_cursada_data = AvanceCursada.query.all()
-        detalles_de_cursos_data = DetallesDeCursos.query.all()
-        cursadas_agrupadas_data = CursadasAgrupadas.query.all()
-        formulario_gestor_data = FormularioGestor.query.all()
-        cuarto_survey_sql_data = CuartoSurveySql.query.all()
-        quinto_survey_sql_data = QuintoSurveySql.query.all()
-        comentarios_2023_data = Comentarios2023.query.all()
-        comentarios_2024_data = Comentarios2024.query.all()
-        base_loop_estaciones_data = BaseLoopEstaciones.query.all()
-        sales_force_data = SalesForce.query.all()
-        comentarios_competencia_data = ComentariosCompetencia.query.all()
+        # --- 1. Recopilar datos de todas las tablas y preparar resumen de contenido ---
+        content_summary = [] # Lista para el resumen de contenido
 
-        # --- Creación del diccionario JSON final (SIN la guía de uso de datos completa aquí) ---
-        # La guía de uso de datos ahora se construye en el util del chat.
-        # Aquí solo ponemos una descripción genérica para el JSON en sí.
+        # Función auxiliar para serializar y calcular el tamaño de una sección
+        def get_serialized_data_and_size(data_list, section_name):
+            serialized_data = [item.serialize() for item in data_list]
+            # Convertir a JSON string para estimar el tamaño real que ocupará en el archivo
+            json_string = json.dumps(serialized_data, ensure_ascii=False)
+            size_bytes = len(json_string.encode('utf-8')) # Tamaño en bytes
+            size_mb = size_bytes / (1024 * 1024) # Tamaño en MB
+            
+            content_summary.append({
+                "nombre": section_name,
+                "incluido": bool(len(data_list) > 0),
+                "peso_mb": round(size_mb, 4), # Redondear para mejor legibilidad
+                "total_registros": len(data_list)
+            })
+            return serialized_data, len(data_list) # Devolver datos serializados y conteo
+
+        comentarios_2025_serialized, comentarios_2025_count = get_serialized_data_and_size(Comentarios2025.query.all(), "comentarios_2025")
+        fichas_google_serialized, fichas_google_count = get_serialized_data_and_size(FichasGoogle.query.all(), "fichas_google")
+        fichas_google_competencia_serialized, fichas_google_competencia_count = get_serialized_data_and_size(FichasGoogleCompetencia.query.all(), "fichas_google_competencia")
+        usuarios_por_asignacion_serialized, usuarios_por_asignacion_count = get_serialized_data_and_size(Usuarios_Por_Asignacion.query.all(), "usuarios_por_asignacion")
+        usuarios_sin_id_serialized, usuarios_sin_id_count = get_serialized_data_and_size(Usuarios_Sin_ID.query.all(), "usuarios_sin_id")
+        valida_usuarios_serialized, valida_usuarios_count = get_serialized_data_and_size(ValidaUsuarios.query.all(), "valida_usuarios")
+        detalle_apies_serialized, detalle_apies_count = get_serialized_data_and_size(DetalleApies.query.all(), "detalle_apies")
+        avance_cursada_serialized, avance_cursada_count = get_serialized_data_and_size(AvanceCursada.query.all(), "avance_cursada")
+        detalles_de_cursos_serialized, detalles_de_cursos_count = get_serialized_data_and_size(DetallesDeCursos.query.all(), "detalles_de_cursos")
+        cursadas_agrupadas_serialized, cursadas_agrupadas_count = get_serialized_data_and_size(CursadasAgrupadas.query.all(), "cursadas_agrupadas")
+        formulario_gestor_serialized, formulario_gestor_count = get_serialized_data_and_size(FormularioGestor.query.all(), "formulario_gestor")
+        cuarto_survey_sql_serialized, cuarto_survey_sql_count = get_serialized_data_and_size(CuartoSurveySql.query.all(), "cuarto_survey_sql")
+        quinto_survey_sql_serialized, quinto_survey_sql_count = get_serialized_data_and_size(QuintoSurveySql.query.all(), "quinto_survey_sql")
+        comentarios_2023_serialized, comentarios_2023_count = get_serialized_data_and_size(Comentarios2023.query.all(), "comentarios_2023")
+        comentarios_2024_serialized, comentarios_2024_count = get_serialized_data_and_size(Comentarios2024.query.all(), "comentarios_2024")
+        base_loop_estaciones_serialized, base_loop_estaciones_count = get_serialized_data_and_size(BaseLoopEstaciones.query.all(), "base_loop_estaciones")
+        sales_force_serialized, sales_force_count = get_serialized_data_and_size(SalesForce.query.all(), "sales_force")
+        comentarios_competencia_serialized, comentarios_competencia_count = get_serialized_data_and_size(ComentariosCompetencia.query.all(), "comentarios_competencia")
+
+
+        # --- Creación del diccionario JSON final ---
         data_json = {
             "descripcion_contenido_archivo": "Este archivo JSON contiene datos operativos y de experiencia del cliente de YPF, organizados por sección. Cada sección (ej., 'comentarios_2025', 'base_loop_estaciones') incluye un campo 'total_registros' y los 'datos' detallados.",
-            # --- Aplicamos el formato {"total_registros": X, "datos": [...]} a TODAS las secciones de datos ---
             "comentarios_2025": {
-                "total_registros": len(comentarios_2025_data),
-                "datos": [c.serialize() for c in comentarios_2025_data]
+                "total_registros": comentarios_2025_count,
+                "datos": comentarios_2025_serialized
             },
             "fichas_google": {
-                "total_registros": len(fichas_google_data),
-                "datos": [f.serialize() for f in fichas_google_data]
+                "total_registros": fichas_google_count,
+                "datos": fichas_google_serialized
             },
             "fichas_google_competencia": {
-                "total_registros": len(fichas_google_competencia_data),
-                "datos": [f.serialize() for f in fichas_google_competencia_data]
+                "total_registros": fichas_google_competencia_count,
+                "datos": fichas_google_competencia_serialized
             },
             "usuarios_por_asignacion": {
-                "total_registros": len(usuarios_por_asignacion_data),
-                "datos": [u.serialize() for u in usuarios_por_asignacion_data]
+                "total_registros": usuarios_por_asignacion_count,
+                "datos": usuarios_por_asignacion_serialized
             },
             "usuarios_sin_id": {
-                "total_registros": len(usuarios_sin_id_data),
-                "datos": [u.serialize() for u in usuarios_sin_id_data]
+                "total_registros": usuarios_sin_id_count,
+                "datos": usuarios_sin_id_serialized
             },
             "valida_usuarios": {
-                "total_registros": len(valida_usuarios_data),
-                "datos": [v.serialize() for v in valida_usuarios_data]
+                "total_registros": valida_usuarios_count,
+                "datos": valida_usuarios_serialized
             },
             "detalle_apies": {
-                "total_registros": len(detalle_apies_data),
-                "datos": [d.serialize() for d in detalle_apies_data]
+                "total_registros": detalle_apies_count,
+                "datos": detalle_apies_serialized
             },
             "avance_cursada": {
-                "total_registros": len(avance_cursada_data),
-                "datos": [a.serialize() for a in avance_cursada_data]
+                "total_registros": avance_cursada_count,
+                "datos": avance_cursada_serialized
             },
             "detalles_de_cursos": {
-                "total_registros": len(detalles_de_cursos_data),
-                "datos": [d.serialize() for d in detalles_de_cursos_data]
+                "total_registros": detalles_de_cursos_count,
+                "datos": detalles_de_cursos_serialized
             },
             "cursadas_agrupadas": {
-                "total_registros": len(cursadas_agrupadas_data),
-                "datos": [c.serialize() for c in cursadas_agrupadas_data]
+                "total_registros": cursadas_agrupadas_count,
+                "datos": cursadas_agrupadas_serialized
             },
             "formulario_gestor": {
-                "total_registros": len(formulario_gestor_data),
-                "datos": [f.serialize() for f in formulario_gestor_data]
+                "total_registros": formulario_gestor_count,
+                "datos": formulario_gestor_serialized
             },
             "cuarto_survey_sql": {
-                "total_registros": len(cuarto_survey_sql_data),
-                "datos": [c.serialize() for c in cuarto_survey_sql_data]
+                "total_registros": cuarto_survey_sql_count,
+                "datos": cuarto_survey_sql_serialized
             },
             "quinto_survey_sql": {
-                "total_registros": len(quinto_survey_sql_data),
-                "datos": [q.serialize() for q in quinto_survey_sql_data]
+                "total_registros": quinto_survey_sql_count,
+                "datos": quinto_survey_sql_serialized
             },
             "comentarios_2023": {
-                "total_registros": len(comentarios_2023_data),
-                "datos": [c.serialize() for c in comentarios_2023_data]
+                "total_registros": comentarios_2023_count,
+                "datos": comentarios_2023_serialized
             },
             "comentarios_2024": {
-                "total_registros": len(comentarios_2024_data),
-                "datos": [c.serialize() for c in comentarios_2024_data]
+                "total_registros": comentarios_2024_count,
+                "datos": comentarios_2024_serialized
             },
             "base_loop_estaciones": {
-                "total_registros": len(base_loop_estaciones_data),
-                "datos": [b.serialize() for b in base_loop_estaciones_data]
+                "total_registros": base_loop_estaciones_count,
+                "datos": base_loop_estaciones_serialized
             },
             "sales_force": {
-                "total_registros": len(sales_force_data),
-                "datos": [s.serialize() for s in sales_force_data]
+                "total_registros": sales_force_count,
+                "datos": sales_force_serialized
             },
             "comentarios_competencia": {
-                "total_registros": len(comentarios_competencia_data),
-                "datos": [c.serialize() for c in comentarios_competencia_data]
+                "total_registros": comentarios_competencia_count,
+                "datos": comentarios_competencia_serialized
             }
         }
 
@@ -823,7 +839,6 @@ def actualizar_archivos_asistente():
                 logger.warning(f"No se pudo eliminar el archivo antiguo '{old_file_id}' de OpenAI. Causa: {e}")
             
             existing_file_record.current_file_id = new_file_id
-            # Eliminado: existing_file_record.usage_guide_text = full_guide_text_for_ai <-- ¡Ya no va aquí!
             db.session.add(existing_file_record)
             db.session.commit()
             logger.info(f"ID de archivo actualizado en la base de datos a: {new_file_id}")
@@ -831,7 +846,6 @@ def actualizar_archivos_asistente():
             logger.info("No se encontró un archivo anterior registrado en la base de datos.")
             new_record = FileDailyID(
                 current_file_id=new_file_id,
-                # Eliminado: usage_guide_text=full_guide_text_for_ai <-- ¡Ya no va aquí!
             )
             db.session.add(new_record)
             db.session.commit()
@@ -840,7 +854,9 @@ def actualizar_archivos_asistente():
         return jsonify({
             "success": True,
             "message": "Archivo de conocimiento diario actualizado y gestionado exitosamente.",
-            "new_file_id": new_file_id
+            "new_file_id": new_file_id,
+            "final_file_size_mb": round(file_size, 4), # Añadimos el tamaño del archivo final
+            "contenido_incluido": content_summary # Añadimos el resumen de contenido
         }), 200
 
     except Exception as e:
