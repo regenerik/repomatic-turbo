@@ -37,6 +37,35 @@ def query_assistant_mentor(prompt: str, thread_id: Optional[str] = None) -> Tupl
     current_knowledge_file_id = daily_file_record.current_file_id
     logger.info(f"Usando archivo de conocimiento con ID recuperado de DB: {current_knowledge_file_id}")
 
+    # --- NUEVA VERIFICACIÓN: Estado del procesamiento del archivo ---
+    try:
+        file_status_check_limit = 10 # Intentar verificar el estado del archivo unas cuantas veces
+        file_check_count = 0
+        file_is_processed = False
+        
+        while file_check_count < file_status_check_limit:
+            file_obj = client.files.retrieve(current_knowledge_file_id)
+            logger.info(f"Estado de procesamiento del archivo {current_knowledge_file_id}: {file_obj.status}")
+            
+            if file_obj.status == "processed":
+                file_is_processed = True
+                break
+            elif file_obj.status == "failed":
+                logger.error(f"El archivo {current_knowledge_file_id} falló su procesamiento en OpenAI. Detalles: {file_obj.error}")
+                raise RuntimeError(f"El archivo de conocimiento ({current_knowledge_file_id}) falló su procesamiento en OpenAI. Por favor, revise el archivo o contacte a soporte si persiste.")
+            
+            file_check_count += 1
+            time.sleep(2) # Esperar un poco antes de volver a consultar el estado
+
+        if not file_is_processed:
+            logger.warning(f"El archivo {current_knowledge_file_id} aún no está 'processed' después de {file_status_check_limit} intentos. Estado actual: {file_obj.status}")
+            raise RuntimeError("La base de conocimiento aún se está procesando. Por favor, inténtelo de nuevo en unos minutos.")
+
+    except Exception as e:
+        logger.error(f"Error al verificar el estado del archivo {current_knowledge_file_id}: {e}", exc_info=True)
+        raise RuntimeError(f"Error al verificar la disponibilidad de la base de conocimiento: {str(e)}")
+
+
     # Configuración de los adjuntos para el mensaje
     attachments = [
         {
@@ -50,16 +79,14 @@ def query_assistant_mentor(prompt: str, thread_id: Optional[str] = None) -> Tupl
     try:
         if not current_thread_id:
             logger.info('thread_id vino SIN contenido (charla nueva). Creando un nuevo hilo...')
-            # LOG DE VERIFICACIÓN 1: Antes de crear el nuevo hilo con adjunto
             logger.info(f"DEBUG: Creando nuevo Thread. Adjuntando file_id: {current_knowledge_file_id}")
             
-            # Crear un nuevo hilo y añadir el primer mensaje con el archivo adjunto
             thread = client.beta.threads.create(
                 messages=[
                     {
                         "role": "user",
                         "content": prompt,
-                        "attachments": attachments # Adjuntamos el archivo aquí
+                        "attachments": attachments
                     }
                 ]
             )
@@ -67,38 +94,31 @@ def query_assistant_mentor(prompt: str, thread_id: Optional[str] = None) -> Tupl
             logger.info(f"Nuevo Thread creado con ID: {current_thread_id}")
         else:
             logger.info(f"thread_id vino con contenido. Continuar hilo existente: {current_thread_id}...")
-            # LOG DE VERIFICACIÓN 2: Antes de añadir el mensaje al hilo existente con adjunto
             logger.info(f"DEBUG: Añadiendo mensaje a Thread existente. Adjuntando file_id: {current_knowledge_file_id}")
             
-            # Añadir el mensaje al hilo existente con el archivo adjunto
             client.beta.threads.messages.create(
                 thread_id=current_thread_id,
                 role="user",
                 content=prompt,
-                attachments=attachments # Adjuntamos el archivo aquí también
+                attachments=attachments
             )
             logger.info(f"Mensaje y archivo adjunto al Thread: {current_thread_id}")
 
         logger.info(f"Creando o continuando run para el Thread: {current_thread_id} con Assistant ID: {ASSISTANT_ID}")
         
-        # Crear y ejecutar el run para el asistente
         run = client.beta.threads.runs.create(
             thread_id=current_thread_id,
             assistant_id=ASSISTANT_ID,
-            # Puedes añadir additional_instructions aquí si son dinámicas
-            # "additional_instructions": "Responde siempre con un nuevo mensaje."
         )
         run_id = run.id
         logger.info(f"Run creado con ID: {run_id}. Estado inicial: {run.status}")
 
-        # Polling: esperar a que el run se complete
         while run.status in ["queued", "in_progress", "cancelling"]:
-            time.sleep(1) # Esperar 1 segundo antes de volver a consultar
+            time.sleep(1)
             run = client.beta.threads.runs.retrieve(thread_id=current_thread_id, run_id=run_id)
             logger.info(f"Estado del Run: {run.status}")
 
         if run.status != "completed":
-            # --- CAMBIO AQUÍ: Extraer detalles del error si el run falló ---
             error_message = f"El asistente no pudo completar la solicitud. Estado: '{run.status}'."
             if run.last_error:
                 error_message += f" Código de error: {run.last_error.code}. Mensaje: {run.last_error.message}"
@@ -106,23 +126,21 @@ def query_assistant_mentor(prompt: str, thread_id: Optional[str] = None) -> Tupl
             else:
                 logger.error("El Run falló, pero no se encontraron detalles adicionales en 'last_error'.")
             
-            raise RuntimeError(error_message) # Lanza el error con más detalles
+            raise RuntimeError(error_message)
 
-        # Recuperar los mensajes del thread
         messages_page = client.beta.threads.messages.list(
             thread_id=current_thread_id,
-            order="desc", # Queremos los más recientes primero
-            limit="1"     # Solo necesitamos el último mensaje del asistente
+            order="desc",
+            limit="1"
         )
         
         assistant_response = ""
-        # Itera sobre los mensajes para encontrar el último del asistente
         for msg in messages_page.data:
             if msg.role == "assistant":
                 for content_block in msg.content:
                     if content_block.type == "text":
                         assistant_response += content_block.text.value
-                break # Una vez que encontramos el último mensaje del asistente, salimos
+                break
 
         if not assistant_response:
             logger.warning(f"El asistente no devolvió un mensaje de texto. Thread ID: {current_thread_id}")
@@ -132,4 +150,4 @@ def query_assistant_mentor(prompt: str, thread_id: Optional[str] = None) -> Tupl
 
     except Exception as e:
         logger.error(f"Error en query_assistant_mentor: {e}", exc_info=True)
-        raise # Re-lanza la excepción para que la ruta la capture y retorne 500
+        raise
