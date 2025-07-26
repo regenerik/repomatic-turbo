@@ -879,11 +879,15 @@ class ComentariosCompetencia(db.Model):
 
 # CLASES PARA QUE FUNCIONE DATA MENTOR Y EL CHAT EN GENERAL >>  Y los modificables de la info extra que recibe la IA>>>>>
 
-class FileDailyID(db.Model): # Si usas Flask-SQLAlchemy
+class FileDailyID(db.Model):
     __tablename__ = 'file_daily_id'
     id = db.Column(db.Integer, primary_key=True)
     current_file_id = db.Column(db.String, unique=True, nullable=False)
-    timestamp = db.Column(db.DateTime, default=db.func.current_timestamp()) # Para llevar un registro de cuándo se actualizó
+    timestamp = db.Column(db.DateTime, default=db.func.current_timestamp())
+
+
+    def __repr__(self):
+        return f"<FileDailyID id={self.id}>"
 
 
 class InstruccionesGenerales(db.Model):
@@ -891,7 +895,6 @@ class InstruccionesGenerales(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     descripcion_general = db.Column(db.Text, nullable=False)
     instrucciones_especificas_para_ia = db.Column(db.Text, nullable=False)
-    # Puedes añadir un campo para saber cuándo fue la última actualización
     last_updated = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     def __repr__(self):

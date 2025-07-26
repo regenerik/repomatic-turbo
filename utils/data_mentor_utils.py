@@ -4,7 +4,7 @@ import requests
 import json
 from typing import Optional, Tuple
 from logging_config import logger
-from models import FileDailyID
+from models import FileDailyID, InstruccionesGenerales, InstruccionesIndividuales
 from openai import OpenAI
 
 # ——————————————————————————————————————————
@@ -28,7 +28,7 @@ client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 def query_assistant_mentor(prompt: str, thread_id: Optional[str] = None) -> Tuple[str, str]:
     logger.info('Entró al util query_assistant_mentor')
     
-    # 1. Obtener el ID del archivo de conocimiento diario más reciente
+    # 1. Obtener el ID del archivo de conocimiento diario más reciente (FileDailyID ya no tiene la guía)
     daily_file_record = FileDailyID.query.first()
     if not daily_file_record:
         logger.error("No se encontró el ID del archivo de conocimiento diario en la base de datos.")
@@ -37,13 +37,50 @@ def query_assistant_mentor(prompt: str, thread_id: Optional[str] = None) -> Tupl
     current_knowledge_file_id = daily_file_record.current_file_id
     logger.info(f"Usando archivo de conocimiento con ID recuperado de DB: {current_knowledge_file_id}")
 
-    # --- NUEVA VERIFICACIÓN: Estado del procesamiento del archivo ---
+    # --- NUEVO: CONSTRUCCIÓN DINÁMICA DE LA GUÍA DE USO DE DATOS DESDE LA DB EN CADA CHAT ---
     try:
-        file_status_check_limit = 10 # Intentar verificar el estado del archivo unas cuantas veces
-        file_check_count = 0
+        general_instructions = InstruccionesGenerales.query.first()
+        if not general_instructions:
+            raise RuntimeError("No se encontraron instrucciones generales en la base de datos para la IA. Por favor, cargue los datos iniciales de las instrucciones.")
+
+        individual_instructions_records = InstruccionesIndividuales.query.all()
+        if not individual_instructions_records:
+            raise RuntimeError("No se encontraron instrucciones individuales en la base de datos para la IA. Por favor, cargue los datos iniciales de las instrucciones.")
+
+        guide_text_parts = ["GUÍA DE USO DE LA BASE DE CONOCIMIENTO:\n"]
+        guide_text_parts.append(f"{general_instructions.descripcion_general}\n\n")
+        guide_text_parts.append("SECCIONES DISPONIBLES:\n")
+
+        for inst_ind in individual_instructions_records:
+            section_name = inst_ind.name
+            
+            guide_text_parts.append(f"\n- Sección: '{section_name}'")
+            guide_text_parts.append(f"  Descripción: {inst_ind.descripcion}")
+            
+            relaciones = inst_ind.get_relaciones_clave_dict() # Usa el método para obtener el dict
+            if relaciones:
+                guide_text_parts.append(f"  Relaciones Clave:")
+                for rel_key, rel_desc in relaciones.items():
+                    guide_text_parts.append(f"    - {rel_key}: {rel_desc}")
+            if inst_ind.ejemplo_consulta:
+                guide_text_parts.append(f"  Ejemplo de Consulta: {inst_ind.ejemplo_consulta}")
+
+        guide_text_parts.append("\nINSTRUCCIONES ESPECÍFICAS DE BÚSQUEDA PARA LA IA:")
+        guide_text_parts.append(general_instructions.instrucciones_especificas_para_ia)
+
+        full_guide_text_for_ai = "\n".join(guide_text_parts)
+        # FIN DE LA CONSTRUCCIÓN DE LA GUÍA DINÁMICA
+        
+    except Exception as e:
+        logger.error(f"Error al construir la guía de IA desde la base de datos: {e}", exc_info=True)
+        raise RuntimeError(f"Error al construir la guía de la IA: {str(e)}")
+
+    # --- Verificación del estado del procesamiento del archivo (mantenemos esto) ---
+    try:
+        file_status_check_limit = 10 
         file_is_processed = False
         
-        while file_check_count < file_status_check_limit:
+        for _ in range(file_status_check_limit):
             file_obj = client.files.retrieve(current_knowledge_file_id)
             logger.info(f"Estado de procesamiento del archivo {current_knowledge_file_id}: {file_obj.status}")
             
@@ -54,8 +91,7 @@ def query_assistant_mentor(prompt: str, thread_id: Optional[str] = None) -> Tupl
                 logger.error(f"El archivo {current_knowledge_file_id} falló su procesamiento en OpenAI. Detalles: {file_obj.error}")
                 raise RuntimeError(f"El archivo de conocimiento ({current_knowledge_file_id}) falló su procesamiento en OpenAI. Por favor, revise el archivo o contacte a soporte si persiste.")
             
-            file_check_count += 1
-            time.sleep(2) # Esperar un poco antes de volver a consultar el estado
+            time.sleep(2) 
 
         if not file_is_processed:
             logger.warning(f"El archivo {current_knowledge_file_id} aún no está 'processed' después de {file_status_check_limit} intentos. Estado actual: {file_obj.status}")
@@ -109,6 +145,7 @@ def query_assistant_mentor(prompt: str, thread_id: Optional[str] = None) -> Tupl
         run = client.beta.threads.runs.create(
             thread_id=current_thread_id,
             assistant_id=ASSISTANT_ID,
+            additional_instructions=full_guide_text_for_ai # <--- ¡Aquí se pasa la guía construida al momento!
         )
         run_id = run.id
         logger.info(f"Run creado con ID: {run_id}. Estado inicial: {run.status}")

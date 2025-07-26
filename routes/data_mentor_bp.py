@@ -712,86 +712,12 @@ def actualizar_archivos_asistente():
         sales_force_data = SalesForce.query.all()
         comentarios_competencia_data = ComentariosCompetencia.query.all()
 
-        # --- CONSTRUCCIÓN DINÁMICA DE LA GUÍA DE USO DE DATOS DESDE LA DB ---
-        general_instructions = InstruccionesGenerales.query.first()
-        if not general_instructions:
-            raise RuntimeError("No se encontraron instrucciones generales en la base de datos. Por favor, cargue los datos en la tabla 'instrucciones_generales'.")
-
-        individual_instructions = InstruccionesIndividuales.query.all()
-        if not individual_instructions:
-            raise RuntimeError("No se encontraron instrucciones individuales en la base de datos. Por favor, cargue los datos en la tabla 'instrucciones_individuales'.")
-
-        secciones_disponibles_guide = {}
-        guide_text_parts = ["GUÍA DE USO DE LA BASE DE CONOCIMIENTO:\n"]
-        guide_text_parts.append(f"{general_instructions.descripcion_general}\n\n")
-        guide_text_parts.append("SECCIONES DISPONIBLES:\n")
-
-        # Mapeo de nombres de modelos a los nombres de claves en el JSON para InstruccionesIndividuales
-        # Asegúrate de que los 'name' en InstruccionesIndividuales coincidan con estas claves.
-        section_data_map = {
-            "comentarios_2025": comentarios_2025_data,
-            "fichas_google": fichas_google_data,
-            "fichas_google_competencia": fichas_google_competencia_data,
-            "usuarios_por_asignacion": usuarios_por_asignacion_data,
-            "usuarios_sin_id": usuarios_sin_id_data,
-            "valida_usuarios": valida_usuarios_data,
-            "detalle_apies": detalle_apies_data,
-            "avance_cursada": avance_cursada_data,
-            "detalles_de_cursos": detalles_de_cursos_data,
-            "cursadas_agrupadas": cursadas_agrupadas_data,
-            "formulario_gestor": formulario_gestor_data,
-            "cuarto_survey_sql": cuarto_survey_sql_data,
-            "quinto_survey_sql": quinto_survey_sql_data,
-            "comentarios_2023": comentarios_2023_data,
-            "comentarios_2024": comentarios_2024_data,
-            "base_loop_estaciones": base_loop_estaciones_data,
-            "sales_force": sales_force_data,
-            "comentarios_competencia": comentarios_competencia_data
-        }
-
-        for inst_ind in individual_instructions:
-            section_name = inst_ind.name
-            section_data = section_data_map.get(section_name, []) # Obtener los datos reales para calcular total_registros
-            
-            section_info_dict = {
-                "descripcion": inst_ind.descripcion,
-                "ejemplo_consulta": inst_ind.ejemplo_consulta
-            }
-            
-            relaciones = inst_ind.get_relaciones_clave_dict()
-            if relaciones:
-                section_info_dict["relaciones_clave"] = relaciones
-            
-            # Ajustar la descripción para el texto de la guía si incluye total_registros/datos
-            if section_data and hasattr(section_data, '__len__'): # Check if it's a list/collection
-                section_info_dict["descripcion"] += " Los datos reales están en 'datos' y el conteo total en 'total_registros'."
-                
-            secciones_disponibles_guide[section_name] = section_info_dict
-
-            # Construir la parte de texto para full_guide_text_for_ai
-            guide_text_parts.append(f"\n- Sección: '{section_name}'")
-            guide_text_parts.append(f"  Descripción: {section_info_dict['descripcion']}")
-            if relaciones:
-                guide_text_parts.append(f"  Relaciones Clave:")
-                for rel_key, rel_desc in relaciones.items():
-                    guide_text_parts.append(f"    - {rel_key}: {rel_desc}")
-            if inst_ind.ejemplo_consulta:
-                guide_text_parts.append(f"  Ejemplo de Consulta: {inst_ind.ejemplo_consulta}")
-
-        guide_text_parts.append("\nINSTRUCCIONES ESPECÍFICAS DE BÚSQUEDA PARA LA IA:")
-        guide_text_parts.append(general_instructions.instrucciones_especificas_para_ia)
-
-        full_guide_text_for_ai = "\n".join(guide_text_parts)
-        # FIN DE LA CONSTRUCCIÓN DE LA GUÍA DINÁMICA
-
-        # --- Creación del diccionario JSON final ---
+        # --- Creación del diccionario JSON final (SIN la guía de uso de datos completa aquí) ---
+        # La guía de uso de datos ahora se construye en el util del chat.
+        # Aquí solo ponemos una descripción genérica para el JSON en sí.
         data_json = {
-            "guia_de_uso_de_datos": {
-                "descripcion_general": general_instructions.descripcion_general,
-                "secciones_disponibles": secciones_disponibles_guide, # Usamos la guía construida dinámicamente
-                "instrucciones_especificas_para_ia": full_guide_text_for_ai # Usamos el texto de la guía construida
-            },
-            # --- Aquí aplicamos el nuevo formato {"total_registros": X, "datos": [...]} a TODAS las secciones de datos ---
+            "descripcion_contenido_archivo": "Este archivo JSON contiene datos operativos y de experiencia del cliente de YPF, organizados por sección. Cada sección (ej., 'comentarios_2025', 'base_loop_estaciones') incluye un campo 'total_registros' y los 'datos' detallados.",
+            # --- Aplicamos el formato {"total_registros": X, "datos": [...]} a TODAS las secciones de datos ---
             "comentarios_2025": {
                 "total_registros": len(comentarios_2025_data),
                 "datos": [c.serialize() for c in comentarios_2025_data]
@@ -866,7 +792,6 @@ def actualizar_archivos_asistente():
             }
         }
 
-        # Crear un archivo JSON temporal para escribir los datos
         with NamedTemporaryFile(mode="w+", delete=False, suffix=".json", encoding="utf-8") as tmpfile:
             json.dump(data_json, tmpfile, indent=2, ensure_ascii=False)
             tmpfile.flush()
@@ -898,19 +823,19 @@ def actualizar_archivos_asistente():
                 logger.warning(f"No se pudo eliminar el archivo antiguo '{old_file_id}' de OpenAI. Causa: {e}")
             
             existing_file_record.current_file_id = new_file_id
-            existing_file_record.usage_guide_text = full_guide_text_for_ai # <-- Guardar la guía
+            # Eliminado: existing_file_record.usage_guide_text = full_guide_text_for_ai <-- ¡Ya no va aquí!
             db.session.add(existing_file_record)
             db.session.commit()
-            logger.info(f"ID de archivo y guía de uso actualizados en la base de datos a: {new_file_id}")
+            logger.info(f"ID de archivo actualizado en la base de datos a: {new_file_id}")
         else:
             logger.info("No se encontró un archivo anterior registrado en la base de datos.")
             new_record = FileDailyID(
                 current_file_id=new_file_id,
-                usage_guide_text=full_guide_text_for_ai # <-- Guardar la guía
+                # Eliminado: usage_guide_text=full_guide_text_for_ai <-- ¡Ya no va aquí!
             )
             db.session.add(new_record)
             db.session.commit()
-            logger.info(f"Nuevo registro de ID de archivo y guía de uso creado en la base de datos: {new_file_id}")
+            logger.info(f"Nuevo registro de ID de archivo creado en la base de datos: {new_file_id}")
 
         return jsonify({
             "success": True,
