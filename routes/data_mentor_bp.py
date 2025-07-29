@@ -253,40 +253,81 @@ def cargar_comentarios_encuesta_2023():
 @data_mentor_bp.route('/cargar_comentarios_2024', methods=['POST'])
 def cargar_comentarios_encuesta_2024():
     """
-    Recibe un archivo .xlsx vía form-data (campo: 'file') y guarda sus registros en la DB
+    Recibe un archivo .xlsx vía form-data (campo: 'file') y guarda sus registros en la DB.
+    Optimizado para bajo uso de memoria mediante procesamiento por lotes (chunks).
     """
     archivo = request.files.get('file')
     if not archivo:
         return jsonify({'error': 'No se envió ningún archivo', 'status': 400}), 400
 
+    total_registros_guardados = 0
+    # Define un tamaño de lote. Ajusta este valor. 
+    # 5000 es un buen punto de partida para 2GB de RAM. 
+    # Si sigue fallando, reduce a 2000 o 1000.
+    BATCH_SIZE = 5000 
+
     try:
-        df = pd.read_excel(archivo)
+        # Usar ExcelFile para abrir el archivo una vez y verificar hojas
+        xls = pd.ExcelFile(archivo)
+        
+        # Determinar la hoja a leer. Por defecto, la primera.
+        if not xls.sheet_names:
+            return jsonify({'error': 'El archivo Excel no contiene hojas.', 'status': 400}), 400
+        sheet_name_to_read = xls.sheet_names[0] # Lee la primera hoja
 
-        registros = []
-        for _, fila in df.iterrows():
-            fecha_raw = fila.get('FECHA')
-            try:
-                fecha = pd.to_datetime(fecha_raw) if pd.notnull(fecha_raw) else None
-            except:
-                fecha = None
+        logger.info(f"Iniciando carga de '{archivo.filename}' (85MB) por lotes (chunksize={BATCH_SIZE}).")
+        
+        # Leer el archivo Excel en chunks. 
+        # pd.read_excel con chunksize devuelve un iterador.
+        # Esto significa que no se carga todo el archivo en memoria a la vez.
+        for i, chunk_df in enumerate(pd.read_excel(archivo, chunksize=BATCH_SIZE, sheet_name=sheet_name_to_read)):
+            registros_chunk = []
+            logger.info(f"Procesando lote {i+1} con {len(chunk_df)} filas.")
+            
+            for _, fila in chunk_df.iterrows():
+                fecha_raw = fila.get('FECHA')
+                try:
+                    # Usar errors='coerce' para convertir a NaT (Not a Time) si hay errores
+                    # NaT se mapeará a None en la DB para campos DateTime
+                    fecha = pd.to_datetime(fecha_raw, errors='coerce') if pd.notnull(fecha_raw) else None
+                except Exception as date_e:
+                    logger.warning(f"Error al convertir fecha '{fecha_raw}': {date_e}. Se usará None.")
+                    fecha = None
 
-            nuevo = Comentarios2024(
-                fecha=fecha,
-                apies=str(fila.get('APIES', '')).strip(),
-                comentario=str(fila.get('COMENTARIO', '')).strip(),
-                canal=str(fila.get('CANAL', '')).strip(),
-                topico=str(fila.get('TÓPICO', '')).strip(),
-                sentiment=str(fila.get('SENTIMENT', '')).strip()
-            )
-            registros.append(nuevo)
+                nuevo = Comentarios2024(
+                    fecha=fecha,
+                    # Usar .get() con un default vacío y luego strip() es una buena práctica
+                    apies=str(fila.get('APIES', '')).strip(),
+                    comentario=str(fila.get('COMENTARIO', '')).strip(),
+                    canal=str(fila.get('CANAL', '')).strip(),
+                    topico=str(fila.get('TÓPICO', '')).strip(),
+                    sentiment=str(fila.get('SENTIMENT', '')).strip()
+                )
+                registros_chunk.append(nuevo)
 
-        db.session.add_all(registros)
-        db.session.commit()
+            # Agregar y commitear el lote si no está vacío
+            if registros_chunk:
+                db.session.add_all(registros_chunk)
+                db.session.commit()
+                total_registros_guardados += len(registros_chunk)
+                logger.info(f"Lote {i+1} guardado. Total acumulado: {total_registros_guardados}")
+            
+            # Es crucial cerrar la sesión y limpiarla después de cada commit para liberar memoria.
+            # db.session.remove() o db.session.close() podrían ser necesarios dependiendo de tu configuración
+            # Si usas Scoped Sessions (común con Flask-SQLAlchemy), db.session.remove() al final del request ya lo haría.
+            # Para asegurar la liberación de memoria en cada lote:
+            db.session.expunge_all() # Desasocia todos los objetos de la sesión para que puedan ser recolectados.
 
-        return jsonify({'mensaje': f'Se guardaron {len(registros)} comentarios', 'status': 200}), 200
+            # Limpiar la lista del chunk para que el recolector de basura actúe más rápido.
+            del registros_chunk 
+            del chunk_df # También ayuda a liberar la referencia al DataFrame del chunk
+            
+        logger.info(f"Proceso de carga completado. Se guardaron {total_registros_guardados} comentarios en total.")
+        return jsonify({'mensaje': f'Se guardaron {total_registros_guardados} comentarios en total.', 'status': 200}), 200
 
     except Exception as e:
-        db.session.rollback()
+        db.session.rollback() # Asegura que la transacción se revierta en caso de error
+        logger.error(f"Error fatal al procesar el archivo Excel: {str(e)}", exc_info=True)
         return jsonify({'error': f'Error al procesar el archivo: {str(e)}', 'status': 500}), 500
     
 @data_mentor_bp.route('/cargar_comentarios_2025', methods=['POST'])
@@ -891,3 +932,180 @@ def actualizar_archivos_asistente():
                 logger.error(f"Error de permiso al intentar eliminar el archivo temporal en el finally block: {pe}")
             except Exception as final_e:
                 logger.error(f"Error inesperado al eliminar el archivo temporal en el finally block: {final_e}")
+
+
+# ESTOS SON TEST DE PORQUE NO ENCUENTRA EL ARCHIVO QUE SE SUPONE QUE YA ESTA ONLINE >>>>>>>>>>>>>>>>>>>> ( DESPUES SE PUEDE BORRAR )
+
+@data_mentor_bp.route("/test-openai-file-status", methods=["GET"])
+def test_openai_file_status():
+    """
+    Ruta para verificar la conectividad a OpenAI y el estado del archivo de conocimiento diario.
+    """
+    logger.info("Iniciando prueba de estado de archivo OpenAI...")
+    
+    # 1. Verificar la clave API
+    api_key = os.getenv('OPENAI_API_KEY')
+    if not api_key:
+        return jsonify({"error": "OPENAI_API_KEY no está configurada como variable de entorno.",
+                        "instrucciones": "Asegúrate de configurar 'OPENAI_API_KEY' en tu entorno local (ej. 'set OPENAI_API_KEY=sk-...' en CMD y reiniciar la terminal/IDE).",
+                        "status": 500}), 500
+
+    # 2. Obtener el file_id más reciente desde tu DB local
+    try:
+        daily_file_record = FileDailyID.query.first()
+        if not daily_file_record:
+            return jsonify({"error": "No se encontró ningún registro de FileDailyID en la base de datos local.",
+                            "instrucciones": "Asegúrate de que la ruta '/actualizar-archivos-asistente' se haya ejecutado al menos una vez con éxito.",
+                            "status": 404}), 404
+        
+        current_file_id = daily_file_record.current_file_id
+        logger.info(f"File ID encontrado en DB local: {current_file_id}")
+
+    except Exception as db_e:
+        logger.error(f"Error al acceder a la base de datos local para FileDailyID: {db_e}", exc_info=True)
+        return jsonify({"error": f"Error interno al acceder a DB local: {str(db_e)}", "status": 500}), 500
+
+    # 3. Consultar a OpenAI el estado del archivo
+    try:
+        file_obj = client.files.retrieve(file_id=current_file_id)
+        
+        response_data = {
+            "success": True,
+            "message": f"Consulta exitosa a OpenAI para el archivo {current_file_id}.",
+            "file_details": {
+                "id": file_obj.id,
+                "status": file_obj.status,
+                "purpose": file_obj.purpose,
+                "size_bytes": file_obj.bytes,
+                "created_at": file_obj.created_at
+            }
+        }
+        
+        if file_obj.status == "failed":
+            response_data["file_details"]["error"] = str(file_obj.error) # Añadir el error si el status es 'failed'
+            logger.error(f"El archivo {current_file_id} está en estado 'failed': {file_obj.error}")
+        elif file_obj.status == "processed":
+            logger.info(f"El archivo {current_file_id} está completamente procesado.")
+        else:
+            logger.warning(f"El archivo {current_file_id} está en estado '{file_obj.status}' (aún no 'processed').")
+
+        return jsonify(response_data), 200
+
+    except Exception as openai_e:
+        logger.error(f"Error al consultar el estado del archivo {current_file_id} en OpenAI: {openai_e}", exc_info=True)
+        return jsonify({"error": f"Error al consultar OpenAI: {str(openai_e)}", "status": 500}), 500
+    
+
+
+@data_mentor_bp.route("/debug-assistant-thread", methods=["GET"])
+def debug_assistant_thread():
+    """
+    Ruta para depurar un Thread específico del Assistant,
+    mostrando mensajes y detalles de Runs (incluyendo tool_calls y outputs).
+    
+    Parámetros de consulta:
+    - thread_id: El ID del thread a depurar.
+    """
+    thread_id = request.args.get("thread_id")
+    if not thread_id:
+        return jsonify({"error": "Falta el 'thread_id' como parámetro de consulta.", "status": 400}), 400
+
+    logger.info(f"Iniciando depuración para el Thread ID: {thread_id}")
+
+    try:
+        # Asegúrate de que el cliente de OpenAI esté inicializado aquí si no lo está globalmente
+        # o si prefieres que se inicialice por cada petición para este endpoint de depuración.
+        # client = OpenAI(api_key=os.getenv('OPENAI_API_KEY')) # Descomenta si lo necesitas aquí
+
+        # 1. Recuperar Mensajes del Thread
+        messages_response = client.beta.threads.messages.list(thread_id=thread_id, order="asc", limit=100)
+        messages_data = []
+        for msg in messages_response.data:
+            content_text = ""
+            for content_block in msg.content:
+                if content_block.type == "text":
+                    content_text += content_block.text.value
+                elif content_block.type == "image_file":
+                    content_text += f"[Contenido de imagen: file_id={content_block.image_file.file_id}]"
+                elif content_block.type == "tool_use": # Para tool_use en los mensajes del asistente (ej. output de Code Interpreter)
+                    content_text += f"[Uso de Herramienta: {content_block.tool_use.name}, ID: {content_block.tool_use.id}]"
+                elif content_block.type == "file_search": # Si hay file_search directamente en el contenido (menos común en mensajes)
+                     content_text += f"[Búsqueda de Archivo: file_ids={content_block.file_search.file_ids}]"
+            
+            messages_data.append({
+                "id": msg.id,
+                "role": msg.role,
+                "content": content_text,
+                "created_at": msg.created_at,
+                "attachments": [att.file_id for att in msg.attachments if hasattr(att, 'file_id')] if msg.attachments else [],
+                "annotations": [] # Puedes expandir esto si las anotaciones son relevantes para tu depuración
+            })
+        logger.info(f"Recuperados {len(messages_data)} mensajes del Thread.")
+
+        # 2. Recuperar Runs del Thread y sus Pasos
+        runs_response = client.beta.threads.runs.list(thread_id=thread_id, order="asc", limit=20)
+        runs_details = []
+
+        for run_obj in runs_response.data:
+            run_detail = {
+                "id": run_obj.id,
+                "status": run_obj.status,
+                "assistant_id": run_obj.assistant_id,
+                "created_at": run_obj.created_at,
+                "failed_error": None,
+                "tool_calls_executed": [], # Herramientas que el Assistant QUISO llamar
+                "tool_outputs_received": [] # Lo que las herramientas realmente DEVOLVIERON
+            }
+
+            if run_obj.status == "failed" and run_obj.last_error:
+                run_detail["failed_error"] = {
+                    "code": run_obj.last_error.code,
+                    "message": run_obj.last_error.message
+                }
+            
+            # Recuperar pasos del Run para ver Tool Calls y Outputs
+            run_steps_response = client.beta.threads.runs.steps.list(thread_id=thread_id, run_id=run_obj.id, order="asc", limit=50)
+            
+            for step in run_steps_response.data:
+                if step.type == "tool_calls" and step.step_details and step.step_details.tool_calls:
+                    for tool_call_detail in step.step_details.tool_calls:
+                        call_info = {
+                            "tool_call_id": tool_call_detail.id,
+                            "type": tool_call_detail.type
+                        }
+                        if tool_call_detail.type == "function" and tool_call_detail.function:
+                            call_info["function_name"] = tool_call_detail.function.name
+                            call_info["function_arguments"] = json.loads(tool_call_detail.function.arguments) # Argumentos como JSON
+                        elif tool_call_detail.type == "file_search":
+                            # La query exacta que File Search hizo no siempre está expuesta en tool_calls en este nivel
+                            # Puede inferirse del output o de logs internos.
+                            call_info["file_search_details"] = tool_call_detail.file_search.model_dump() if hasattr(tool_call_detail.file_search, 'model_dump') else "Detalles de File Search disponibles"
+                        
+                        run_detail["tool_calls_executed"].append(call_info)
+
+                elif step.type == "tool_outputs" and step.step_details and hasattr(step.step_details, 'tool_outputs'):
+                    for output in step.step_details.tool_outputs:
+                        output_info = {
+                            "tool_call_id": output.tool_call_id,
+                            "output": output.output # Este es el resultado que la herramienta devolvió
+                        }
+                        run_detail["tool_outputs_received"].append(output_info)
+            
+            runs_details.append(run_detail)
+
+        return jsonify({
+            "success": True,
+            "thread_id": thread_id,
+            "messages": messages_data,
+            "runs_details": runs_details
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error al depurar el Thread {thread_id}: {e}", exc_info=True)
+        # Puedes añadir instrucciones si el error es por clave API o Thread ID no encontrado
+        error_message = f"Error al depurar el Thread: {str(e)}"
+        if "No such thread" in str(e):
+            error_message += ". El Thread ID proporcionado no existe."
+        elif "authentication" in str(e).lower() or "api_key" in str(e).lower():
+            error_message += ". Problema de autenticación con la API Key."
+        return jsonify({"error": error_message, "status": 500}), 500
