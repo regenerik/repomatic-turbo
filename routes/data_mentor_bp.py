@@ -20,6 +20,8 @@ import tempfile
 from openai import OpenAI
 import httpx
 from tempfile import NamedTemporaryFile
+import openpyxl
+from io import BytesIO
 
 
 
@@ -254,7 +256,7 @@ def cargar_comentarios_encuesta_2023():
 def cargar_comentarios_encuesta_2024():
     """
     Recibe un archivo .xlsx vía form-data (campo: 'file') y guarda sus registros en la DB.
-    Optimizado para bajo uso de memoria mediante procesamiento por lotes (chunks).
+    Optimizado para bajo uso de memoria mediante procesamiento fila a fila con openpyxl.
     Incluye logs detallados de progreso.
     """
     archivo = request.files.get('file')
@@ -263,74 +265,135 @@ def cargar_comentarios_encuesta_2024():
         return jsonify({'error': 'No se envió ningún archivo', 'status': 400}), 400
 
     total_registros_guardados = 0
-    # Define un tamaño de lote. Ajusta este valor según tu memoria disponible y tamaño de fila.
-    BATCH_SIZE = 2000 
+    BATCH_SIZE = 5000 # Define un tamaño de lote para la DB. Ajusta este valor.
 
     logger.info("======================================================")
-    logger.info("============= INICIANDO PROCESO DE CARGA =============")
+    logger.info("============= INICIANDO PROCESO DE CARGA ==============")
     logger.info("======================================================")
     logger.info(f"Archivo recibido: '{archivo.filename}' ({archivo.content_length / (1024*1024):.2f} MB)")
-    logger.info(f"Tamaño de lote (BATCH_SIZE) configurado: {BATCH_SIZE} filas por chunk.")
+    logger.info(f"Tamaño de lote (BATCH_SIZE) para DB: {BATCH_SIZE} filas por commit.")
 
     try:
-        # Usar ExcelFile para abrir el archivo una vez y verificar hojas
-        xls = pd.ExcelFile(archivo)
+        # Convertir el FileStorage de Flask a un BytesIO para openpyxl
+        # openpyxl puede leer directamente desde un objeto BytesIO
+        excel_data = BytesIO(archivo.read())
         
-        # Determinar la hoja a leer. Por defecto, la primera.
-        if not xls.sheet_names:
+        # Cargar el workbook (solo el esqueleto, los datos se leen on-demand)
+        # read_only=True y data_only=True son CRUCIALES para bajo consumo de memoria
+        workbook = openpyxl.load_workbook(excel_data, read_only=True, data_only=True)
+        
+        # Seleccionar la hoja activa (o una por nombre si sabes cuál es)
+        if not workbook.sheetnames:
             logger.error("El archivo Excel recibido no contiene hojas.")
             return jsonify({'error': 'El archivo Excel no contiene hojas.', 'status': 400}), 400
-        sheet_name_to_read = xls.sheet_names[0] # Lee la primera hoja
-        logger.info(f"Se procesará la hoja: '{sheet_name_to_read}'")
+        
+        sheet = workbook[workbook.sheetnames[0]] # Accede a la primera hoja por defecto
+        logger.info(f"Se procesará la hoja: '{sheet.title}'")
 
+        # Asumimos que la primera fila son los encabezados
+        # Leer los encabezados para mapear nombres de columna a índices
+        headers = [cell.value for cell in sheet[1]] # Fila 1 para encabezados
+        
+        # Mapear encabezados a índices para acceso más robusto
+        header_map = {header.strip().upper(): i for i, header in enumerate(headers) if header}
+        
+        # Columnas esperadas en tu modelo y sus respectivos encabezados en Excel
+        # Asegúrate de que estos nombres coincidan con tus columnas de Excel (en mayúsculas)
+        col_fecha = header_map.get('FECHA')
+        col_apies = header_map.get('APIES')
+        col_comentario = header_map.get('COMENTARIO')
+        col_canal = header_map.get('CANAL')
+        col_topico = header_map.get('TÓPICO')
+        col_sentiment = header_map.get('SENTIMENT')
+
+        # Verificar que las columnas obligatorias existan
+        if col_fecha is None or col_apies is None or col_comentario is None or \
+           col_canal is None or col_topico is None or col_sentiment is None:
+            missing_cols = []
+            if col_fecha is None: missing_cols.append('FECHA')
+            if col_apies is None: missing_cols.append('APIES')
+            if col_comentario is None: missing_cols.append('COMENTARIO')
+            if col_canal is None: missing_cols.append('CANAL')
+            if col_topico is None: missing_cols.append('TÓPICO')
+            if col_sentiment is None: missing_cols.append('SENTIMENT')
+            
+            error_msg = f"Faltan columnas requeridas en el archivo Excel: {', '.join(missing_cols)}. Asegúrate de que los encabezados coincidan (MAYÚSCULAS)."
+            logger.error(error_msg)
+            return jsonify({'error': error_msg, 'status': 400}), 400
+
+        registros_chunk = []
+        row_counter_total = 0 # Contador para las filas reales del Excel
         chunk_counter = 0
-        # Leer el archivo Excel en chunks. pd.read_excel con chunksize devuelve un iterador.
-        for chunk_df in pd.read_excel(archivo, chunksize=BATCH_SIZE, sheet_name=sheet_name_to_read):
-            chunk_counter += 1
-            registros_chunk = []
-            
-            logger.info(f"--- Iniciando procesamiento del CHUNK {chunk_counter} ({len(chunk_df)} filas) ---")
-            
-            for index, fila in chunk_df.iterrows(): # Usamos 'index' para referencia de fila dentro del chunk
-                fecha_raw = fila.get('FECHA')
-                try:
-                    fecha = pd.to_datetime(fecha_raw, errors='coerce') if pd.notnull(fecha_raw) else None
-                except Exception as date_e:
-                    logger.warning(f"CHUNK {chunk_counter}, Fila {index+2} (línea Excel): Error al convertir fecha '{fecha_raw}': {date_e}. Se usará None.")
-                    fecha = None
 
-                nuevo = Comentarios2024(
-                    fecha=fecha,
-                    apies=str(fila.get('APIES', '')).strip(),
-                    comentario=str(fila.get('COMENTARIO', '')).strip(),
-                    canal=str(fila.get('CANAL', '')).strip(),
-                    topico=str(fila.get('TÓPICO', '')).strip(),
-                    sentiment=str(fila.get('SENTIMENT', '')).strip()
-                )
-                registros_chunk.append(nuevo)
+        # Iterar sobre las filas de la hoja, empezando desde la segunda fila (después del encabezado)
+        for row_index, row in enumerate(sheet.iter_rows(min_row=2)): # min_row=2 para saltar encabezado
+            row_counter_total += 1
+            
+            # Extraer valores de celda de forma segura
+            fecha_raw = row[col_fecha].value if col_fecha is not None else None
+            apies = row[col_apies].value if col_apies is not None else ''
+            comentario = row[col_comentario].value if col_comentario is not None else ''
+            canal = row[col_canal].value if col_canal is not None else ''
+            topico = row[col_topico].value if col_topico is not None else ''
+            sentiment = row[col_sentiment].value if col_sentiment is not None else ''
+            
+            try:
+                # openpyxl ya devuelve fechas como objetos datetime de Python si están formateadas como tal
+                # No necesitamos pd.to_datetime si openpyxl ya hizo el parsing
+                fecha = fecha_raw
+                if isinstance(fecha, datetime):
+                    pass # Ya es un datetime
+                elif pd.notnull(fecha_raw) and fecha_raw: # Si no es datetime pero tiene valor, intentar parsear
+                    fecha = pd.to_datetime(fecha_raw, errors='coerce') 
+                else:
+                    fecha = None # Si es None o vacío
+            except Exception as date_e:
+                logger.warning(f"Fila Excel {row_index+2}: Error al convertir fecha '{fecha_raw}': {date_e}. Se usará None.")
+                fecha = None
 
-            # Agregar y commitear el lote si no está vacío
-            if registros_chunk:
+            nuevo = Comentarios2024(
+                fecha=fecha,
+                apies=str(apies).strip(),
+                comentario=str(comentario).strip(),
+                canal=str(canal).strip(),
+                topico=str(topico).strip(),
+                sentiment=str(sentiment).strip()
+            )
+            registros_chunk.append(nuevo)
+
+            # Si el chunk alcanza el tamaño definido, lo guardamos en la DB
+            if len(registros_chunk) >= BATCH_SIZE:
+                chunk_counter += 1
+                logger.info(f"--- Iniciando commit del CHUNK {chunk_counter} ({len(registros_chunk)} filas) ---")
+                
                 db.session.add_all(registros_chunk)
                 db.session.commit()
                 total_registros_guardados += len(registros_chunk)
                 logger.info(f"CHUNK {chunk_counter} COMPLETO. Guardados {len(registros_chunk)} registros en DB.")
                 logger.info(f"TOTAL DE REGISTROS GUARDADOS HASTA AHORA: {total_registros_guardados}")
-            else:
-                logger.warning(f"CHUNK {chunk_counter} estaba vacío o no contenía registros válidos para guardar.")
-            
-            # Liberar memoria de los objetos del chunk
-            db.session.expunge_all() 
-            del registros_chunk 
-            del chunk_df 
-            # Si hay muchos logs de memoria, podrías añadir un gc.collect() aquí, pero suele ser automático.
-            # import gc; gc.collect() 
-            
-            logger.info(f"--- Memoria del CHUNK {chunk_counter} liberada. ---")
+                
+                # Liberar memoria de los objetos del chunk
+                db.session.expunge_all() 
+                del registros_chunk 
+                registros_chunk = [] # Reiniciar la lista para el siguiente lote
+                
+                logger.info(f"--- Memoria del CHUNK {chunk_counter} liberada. ---")
 
+        # Guardar los registros restantes (el último lote, que puede ser menor que BATCH_SIZE)
+        if registros_chunk:
+            chunk_counter += 1
+            logger.info(f"--- Iniciando commit del CHUNK FINAL {chunk_counter} ({len(registros_chunk)} filas restantes) ---")
+            db.session.add_all(registros_chunk)
+            db.session.commit()
+            total_registros_guardados += len(registros_chunk)
+            logger.info(f"CHUNK FINAL {chunk_counter} COMPLETO. Guardados {len(registros_chunk)} registros en DB.")
+            logger.info(f"TOTAL DE REGISTROS GUARDADOS EN LA DB: {total_registros_guardados}")
+            db.session.expunge_all()
+            del registros_chunk
 
         logger.info("======================================================")
-        logger.info("============ PROCESO DE CARGA FINALIZADO =============")
+        logger.info("============ PROCESO DE CARGA FINALIZADO ============")
+        logger.info(f"TOTAL DE FILAS PROCESADAS EN EXCEL: {row_counter_total}")
         logger.info(f"TOTAL DE REGISTROS GUARDADOS EN LA DB: {total_registros_guardados}")
         logger.info("======================================================")
         
