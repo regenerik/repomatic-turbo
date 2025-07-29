@@ -441,46 +441,122 @@ def cargar_comentarios_encuesta_2024():
 @data_mentor_bp.route('/cargar_comentarios_2025', methods=['POST'])
 def cargar_comentarios_encuesta_2025():
     """
-    Carga masiva de comentarios desde archivo .xlsx.
-    Detecta duplicados por hash_id (tanto en DB como en el archivo actual)
-    y usa bulk_save_objects para velocidad.
+    Recibe un archivo .xlsx vía form-data (campo: 'file') y guarda sus registros en la DB.
+    Implementa lógica incremental (deduplicación por hash_id) y optimización de memoria
+    mediante openpyxl y procesamiento por lotes.
+    Incluye logs detallados de progreso y tiempo de ejecución.
     """
+    start_time = datetime.now() # Iniciar el temporizador
+
     archivo = request.files.get('file')
     if not archivo:
+        logger.error("No se envió ningún archivo en la solicitud.")
         return jsonify({'error': 'No se envió ningún archivo', 'status': 400}), 400
 
+    # Contadores para el resumen final
+    total_registros_guardados = 0
+    total_filas_excel_leidas = 0
+    date_errors_count = 0
+    sample_date_errors = []
+    MAX_SAMPLE_DATE_ERRORS = 5 
+    duplicados_en_archivo_contados = 0
+    duplicados_en_db_contados = 0
+
+    # Este set rastreará todos los hashes únicos encontrados en el ARCHIVO ACTUAL
+    # para evitar duplicados que aparezcan en diferentes lotes del mismo archivo.
+    all_hashes_seen_in_current_file_session = set() 
+
+    BATCH_SIZE = 5000 
+
+    logger.info("======================================================")
+    logger.info("====== INICIANDO PROCESO DE CARGA COMENTARIOS 2025 ======")
+    logger.info("======================================================")
+    logger.info(f"Hora de inicio: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"Archivo recibido: '{archivo.filename}' ({archivo.content_length / (1024*1024):.2f} MB)")
+    logger.info(f"Tamaño de lote (BATCH_SIZE) para DB: {BATCH_SIZE} filas por commit.")
+
     try:
-        df = pd.read_excel(archivo)
+        excel_data = BytesIO(archivo.read())
+        workbook = openpyxl.load_workbook(excel_data, read_only=True, data_only=True)
+        
+        if not workbook.sheetnames:
+            logger.error("El archivo Excel recibido no contiene hojas.")
+            return jsonify({'error': 'El archivo Excel no contiene hojas.', 'status': 400}), 400
+        
+        sheet = workbook[workbook.sheetnames[0]] 
+        logger.info(f"Se procesará la hoja: '{sheet.title}'")
 
-        # Paso 1: Preparamos todos los registros con hash,
-        #         filtrando duplicados DENTRO del archivo actual
-        records_from_file = []
-        # Usamos un set para rastrear los hashes ya vistos en ESTE ARCHIVO
-        unique_hashes_in_current_file = set()
+        # Asumimos que la primera fila son los encabezados
+        headers = [cell.value for cell in sheet[1]] 
+        header_map = {str(header).strip().upper(): i for i, header in enumerate(headers) if header}
+        
+        # Mapeo de columnas, asegurando que existan
+        col_fecha = header_map.get('FECHA')
+        col_apies = header_map.get('APIES')
+        col_comentario = header_map.get('COMENTARIO')
+        col_canal = header_map.get('CANAL')
+        col_topico = header_map.get('TÓPICO')
+        col_sentiment = header_map.get('SENTIMENT')
 
-        for _, fila in df.iterrows():
-            fecha_raw = fila.get('FECHA')
+        # Verificar que las columnas obligatorias existan
+        required_cols = {'FECHA', 'APIES', 'COMENTARIO', 'CANAL', 'TÓPICO', 'SENTIMENT'}
+        missing_cols = [col for col in required_cols if header_map.get(col) is None]
+        if missing_cols:
+            error_msg = f"Faltan columnas requeridas en el archivo Excel: {', '.join(missing_cols)}. Asegúrate de que los encabezados coincidan (MAYÚSCULAS)."
+            logger.error(error_msg)
+            return jsonify({'error': error_msg, 'status': 400}), 400
+
+        registros_para_lote_db = [] # Esta lista contendrá los objetos ORM para el bulk_save_objects
+        chunk_counter = 0
+
+        # Iterar sobre las filas de la hoja, empezando desde la segunda fila (después del encabezado)
+        for row_index_excel, row in enumerate(sheet.iter_rows(min_row=2), start=2): 
+            total_filas_excel_leidas += 1
+            
+            # Extraer valores de celda de forma segura
+            fecha_raw = row[col_fecha].value
+            apies = row[col_apies].value
+            comentario = row[col_comentario].value
+            canal = row[col_canal].value
+            topico = row[col_topico].value
+            sentiment = row[col_sentiment].value
+            
+            # --- Manejo de la fecha y generación del hash ---
+            fecha = None
             try:
-                fecha = pd.to_datetime(fecha_raw) if pd.notnull(fecha_raw) else None
-            except Exception as e:
-                logger.warning(f"Error al parsear fecha '{fecha_raw}': {e}. Asignando None.")
-                fecha = None
-
-            apies = str(fila.get('APIES', '')).strip()
-            comentario = str(fila.get('COMENTARIO', '')).strip()
-            canal = str(fila.get('CANAL', '')).strip()
-            topico = str(fila.get('TÓPICO', '')).strip()
-            sentiment = str(fila.get('SENTIMENT', '')).strip()
+                if isinstance(fecha_raw, datetime):
+                    fecha = fecha_raw 
+                elif pd.notnull(fecha_raw) and str(fecha_raw).strip():
+                    fecha = pd.to_datetime(fecha_raw, errors='coerce') 
+                
+                if fecha is pd.NaT: # Si el parseo de Pandas falló y coecionó
+                    date_errors_count += 1
+                    if len(sample_date_errors) < MAX_SAMPLE_DATE_ERRORS:
+                        sample_date_errors.append(f"Fila {row_index_excel}: '{fecha_raw}'")
+                    fecha = None # Asegurarse de que sea None para la DB si falló el parseo
+            except Exception as date_e:
+                date_errors_count += 1
+                if len(sample_date_errors) < MAX_SAMPLE_DATE_ERRORS:
+                    sample_date_errors.append(f"Fila {row_index_excel}: '{fecha_raw}' - {date_e}")
+                fecha = None 
+            
+            # Stripear strings antes de generar hash y crear objeto
+            apies = str(apies if apies is not None else '').strip()
+            comentario = str(comentario if comentario is not None else '').strip()
+            canal = str(canal if canal is not None else '').strip()
+            topico = str(topico if topico is not None else '').strip()
+            sentiment = str(sentiment if sentiment is not None else '').strip()
 
             # Generar hash único para este registro
-            hash_id = Comentarios2025.generar_hash(fecha, apies, comentario, canal)
+            hash_id = Comentarios2025.generar_hash(fecha, apies, comentario, canal) # Usamos el método de tu modelo
 
-            # Verificar si este hash_id ya fue visto en el archivo ACTUAL
-            if hash_id in unique_hashes_in_current_file:
-                logger.info(f"Saltando registro duplicado DENTRO DEL ARCHIVO con hash_id: {hash_id}")
-                continue # Saltar esta fila, ya la procesamos o es un duplicado interno
+            # Verificar si este hash_id ya fue visto en el archivo ACTUAL (en cualquier lote procesado)
+            if hash_id in all_hashes_seen_in_current_file_session:
+                duplicados_en_archivo_contados += 1
+                # logger.debug(f"Saltando duplicado DENTRO DEL ARCHIVO (hash: {hash_id}) en fila {row_index_excel}.")
+                continue # Saltar esta fila, ya fue procesada o es un duplicado interno
 
-            unique_hashes_in_current_file.add(hash_id) # Registrar este hash_id como visto
+            all_hashes_seen_in_current_file_session.add(hash_id) # Registrar este hash_id como visto
 
             comentario_obj = Comentarios2025(
                 fecha=fecha,
@@ -489,38 +565,133 @@ def cargar_comentarios_encuesta_2025():
                 canal=canal,
                 topico=topico,
                 sentiment=sentiment,
-                hash_id=hash_id
+                hash_id=hash_id # Asignar el hash_id al objeto
             )
-            records_from_file.append(comentario_obj)
+            registros_para_lote_db.append(comentario_obj)
 
-        # Paso 2: Buscar cuáles de los hashes únicos del archivo ya existen en la base de datos
-        all_unique_hashes_from_file = [r.hash_id for r in records_from_file]
+            # Si el lote para DB alcanza el tamaño definido, procesamos y guardamos
+            if len(registros_para_lote_db) >= BATCH_SIZE:
+                chunk_counter += 1
+                logger.info(f"--- Procesando LOTE {chunk_counter} ({len(registros_para_lote_db)} candidatos para DB) ---")
+                
+                # Obtener los hashes de este lote para consultar la DB
+                hashes_en_lote = [obj.hash_id for obj in registros_para_lote_db]
+                
+                # Consultar la DB para ver cuáles de estos hashes ya existen
+                existentes_en_db_lote = set(
+                    r[0] for r in db.session.query(Comentarios2025.hash_id)
+                    .filter(Comentarios2025.hash_id.in_(hashes_en_lote))
+                    .all()
+                )
+                
+                # Filtrar los que realmente son nuevos para insertar
+                nuevos_para_insertar = [
+                    obj for obj in registros_para_lote_db 
+                    if obj.hash_id not in existentes_en_db_lote
+                ]
+                
+                duplicados_en_db_contados += (len(registros_para_lote_db) - len(nuevos_para_insertar))
 
-        existentes_en_db = set(
-            r[0] for r in db.session.query(Comentarios2025.hash_id)
-            .filter(Comentarios2025.hash_id.in_(all_unique_hashes_from_file))
-            .all()
-        )
+                if nuevos_para_insertar:
+                    # Usamos bulk_save_objects para una inserción más eficiente
+                    db.session.bulk_save_objects(nuevos_para_insertar)
+                    db.session.commit()
+                    total_registros_guardados += len(nuevos_para_insertar)
+                    logger.info(f"LOTE {chunk_counter} COMPLETO. Insertados {len(nuevos_para_insertar)} nuevos registros en DB.")
+                    logger.info(f"TOTAL ACUMULADO GUARDADOS: {total_registros_guardados}")
+                    logger.info(f"TOTAL ACUMULADO DUPLICADOS EN DB IGNORADOS: {duplicados_en_db_contados}")
+                else:
+                    logger.info(f"LOTE {chunk_counter} COMPLETO. No se encontraron registros nuevos para insertar en DB.")
+                
+                db.session.expunge_all() 
+                del registros_para_lote_db 
+                registros_para_lote_db = [] # Reiniciar la lista para el siguiente lote
+                
+                logger.info(f"--- Memoria del LOTE {chunk_counter} liberada. ---")
 
-        # Paso 3: Filtrar duplicados que ya existen en la DB
-        nuevos = [c for c in records_from_file if c.hash_id not in existentes_en_db]
+        # --- Fin del bucle de filas ---
 
-        # Paso 4: Insertar de forma masiva
-        if nuevos:
-            db.session.bulk_save_objects(nuevos)
-            db.session.commit()
+        # Procesar y guardar los registros restantes (el último lote, si lo hay)
+        if registros_para_lote_db:
+            chunk_counter += 1
+            logger.info(f"--- Procesando LOTE FINAL {chunk_counter} ({len(registros_para_lote_db)} candidatos restantes) ---")
+            
+            hashes_en_lote = [obj.hash_id for obj in registros_para_lote_db]
+            existentes_en_db_lote = set(
+                r[0] for r in db.session.query(Comentarios2025.hash_id)
+                .filter(Comentarios2025.hash_id.in_(hashes_en_lote))
+                .all()
+            )
+            nuevos_para_insertar = [
+                obj for obj in registros_para_lote_db 
+                if obj.hash_id not in existentes_en_db_lote
+            ]
+            duplicados_en_db_contados += (len(registros_para_lote_db) - len(nuevos_para_insertar))
 
+            if nuevos_para_insertar:
+                db.session.bulk_save_objects(nuevos_para_insertar)
+                db.session.commit()
+                total_registros_guardados += len(nuevos_para_insertar)
+                logger.info(f"LOTE FINAL {chunk_counter} COMPLETO. Insertados {len(nuevos_para_insertar)} nuevos registros en DB.")
+            else:
+                logger.info(f"LOTE FINAL {chunk_counter} COMPLETO. No se encontraron registros nuevos para insertar en DB.")
+            
+            db.session.expunge_all()
+            del registros_para_lote_db
+
+        end_time = datetime.now() 
+        time_elapsed = end_time - start_time
+        seconds = int(time_elapsed.total_seconds())
+        time_format = str(timedelta(seconds=seconds))
+
+        logger.info("======================================================")
+        logger.info("========== PROCESO DE CARGA COMENTARIOS 2025 FINALIZADO ==========")
+        logger.info(f"Hora de finalización: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"Tiempo total de ejecución: {time_format}")
+        logger.info(f"TOTAL DE FILAS LEÍDAS DEL EXCEL: {total_filas_excel_leidas}")
+        logger.info(f"TOTAL DE REGISTROS NUEVOS GUARDADOS EN LA DB: {total_registros_guardados}")
+        logger.info(f"TOTAL DE DUPLICADOS EN EL ARCHIVO IGNORADOS: {duplicados_en_archivo_contados}")
+        logger.info(f"TOTAL DE DUPLICADOS EN LA DB IGNORADOS: {duplicados_en_db_contados}")
+        if date_errors_count > 0:
+            logger.warning(f"ADVERTENCIA: Se encontraron {date_errors_count} errores al parsear fechas. Ejemplos: {'; '.join(sample_date_errors)}")
+        logger.info("======================================================")
+        
         return jsonify({
-            'mensaje': f'Se guardaron {len(nuevos)} comentarios nuevos',
-            'duplicados_ignorados_en_archivo': len(df) - len(records_from_file), # Nuevos: cuántos se descartaron por ser duplicados en el archivo
-            'duplicados_ignorados_en_db': len(records_from_file) - len(nuevos),  # Cuántos se descartaron por ya estar en la DB
-            'status': 200
+            'mensaje': f'Se guardaron {total_registros_guardados} comentarios nuevos en total.',
+            'status': 200,
+            'tiempo_de_guardado': time_format,
+            'detalles_procesamiento': {
+                'total_filas_excel_leidas': total_filas_excel_leidas,
+                'total_registros_db_guardados': total_registros_guardados,
+                'duplicados_ignorados_en_archivo': duplicados_en_archivo_contados,
+                'duplicados_ignorados_en_db': duplicados_en_db_contados,
+                'errores_fecha_contados': date_errors_count,
+                'ejemplos_errores_fecha': sample_date_errors if date_errors_count > 0 else "Ninguno"
+            }
         }), 200
 
     except Exception as e:
-        db.session.rollback()
-        logger.error(f"Error al procesar el archivo de comentarios 2025: {e}", exc_info=True)
-        return jsonify({'error': f'Error al procesar el archivo: {str(e)}', 'status': 500}), 500
+        db.session.rollback() 
+        end_time = datetime.now() 
+        time_elapsed_on_error = end_time - start_time
+        seconds_on_error = int(time_elapsed_on_error.total_seconds())
+        time_format_on_error = str(timedelta(seconds=seconds_on_error))
+
+        logger.error("======================================================")
+        logger.error("============ ERROR FATAL DURANTE LA CARGA ============")
+        logger.error(f"Hora del error: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.error(f"Tiempo transcurrido hasta el error: {time_format_on_error}")
+        logger.error(f"Error: {str(e)}", exc_info=True)
+        logger.error("======================================================")
+        return jsonify({
+            'error': f'Error al procesar el archivo: {str(e)}', 
+            'status': 500,
+            'tiempo_transcurrido_hasta_error': time_format_on_error,
+            'detalles_procesamiento': {
+                'total_filas_excel_leidas': total_filas_excel_leidas,
+                'total_registros_db_guardados_hasta_error': total_registros_guardados # Registros guardados antes del error
+            }
+        }), 500
     
 @data_mentor_bp.route('/cargar_base_loop', methods=['POST'])
 def cargar_base_loop():

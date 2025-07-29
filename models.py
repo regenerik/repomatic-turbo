@@ -550,7 +550,7 @@ class Comentarios2024(db.Model):
         return f"<ComentarioEncuesta id={self.id} apies={self.apies}>"
 
 class Comentarios2025(db.Model):
-    __tablename__ = 'comentarios_encuesta_2025'
+    __tablename__ = 'comentarios_encuesta_2025' # ¡Tu nombre de tabla específico!
 
     id = db.Column(db.Integer, primary_key=True)
     fecha = db.Column(db.DateTime, nullable=True)
@@ -561,7 +561,6 @@ class Comentarios2025(db.Model):
     sentiment = db.Column(db.String(50), nullable=True, default="")
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-    # Nuevo campo hash único
     hash_id = db.Column(db.String(64), unique=True, index=True)
 
     def serialize(self):
@@ -584,9 +583,17 @@ class Comentarios2025(db.Model):
     def generar_hash(fecha, apies, comentario, canal):
         """
         Método auxiliar para generar hash_id a partir de los campos clave.
+        Asegura que la representación de la fecha sea consistente para el hash.
         """
-        texto = f"{fecha}|{apies}|{comentario}|{canal}"
-        return hashlib.md5(texto.encode('utf-8')).hexdigest()
+        # Convertir fecha a un string consistente para hashing
+        # Si fecha es datetime, usa ISO format. Si es None, str(None) es "None".
+        # Esto asegura que el mismo comentario siempre genere el mismo hash.
+        fecha_str = fecha.isoformat() if isinstance(fecha, datetime) else str(fecha)
+        
+        # Asegurarse de que todos los componentes sean strings antes de concatenar y codificar
+        data_string = f"{fecha_str}|{str(apies)}|{str(comentario)}|{str(canal)}"
+        
+        return hashlib.md5(data_string.encode('utf-8')).hexdigest()
     
 class BaseLoopEstaciones(db.Model):
     __tablename__ = 'base_loop_estaciones'
