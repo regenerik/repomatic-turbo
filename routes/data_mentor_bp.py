@@ -255,16 +255,22 @@ def cargar_comentarios_encuesta_2024():
     """
     Recibe un archivo .xlsx vía form-data (campo: 'file') y guarda sus registros en la DB.
     Optimizado para bajo uso de memoria mediante procesamiento por lotes (chunks).
+    Incluye logs detallados de progreso.
     """
     archivo = request.files.get('file')
     if not archivo:
+        logger.error("No se envió ningún archivo en la solicitud.")
         return jsonify({'error': 'No se envió ningún archivo', 'status': 400}), 400
 
     total_registros_guardados = 0
-    # Define un tamaño de lote. Ajusta este valor. 
-    # 5000 es un buen punto de partida para 2GB de RAM. 
-    # Si sigue fallando, reduce a 2000 o 1000.
-    BATCH_SIZE = 5000 
+    # Define un tamaño de lote. Ajusta este valor según tu memoria disponible y tamaño de fila.
+    BATCH_SIZE = 2000 
+
+    logger.info("======================================================")
+    logger.info("============= INICIANDO PROCESO DE CARGA =============")
+    logger.info("======================================================")
+    logger.info(f"Archivo recibido: '{archivo.filename}' ({archivo.content_length / (1024*1024):.2f} MB)")
+    logger.info(f"Tamaño de lote (BATCH_SIZE) configurado: {BATCH_SIZE} filas por chunk.")
 
     try:
         # Usar ExcelFile para abrir el archivo una vez y verificar hojas
@@ -272,31 +278,29 @@ def cargar_comentarios_encuesta_2024():
         
         # Determinar la hoja a leer. Por defecto, la primera.
         if not xls.sheet_names:
+            logger.error("El archivo Excel recibido no contiene hojas.")
             return jsonify({'error': 'El archivo Excel no contiene hojas.', 'status': 400}), 400
         sheet_name_to_read = xls.sheet_names[0] # Lee la primera hoja
+        logger.info(f"Se procesará la hoja: '{sheet_name_to_read}'")
 
-        logger.info(f"Iniciando carga de '{archivo.filename}' (85MB) por lotes (chunksize={BATCH_SIZE}).")
-        
-        # Leer el archivo Excel en chunks. 
-        # pd.read_excel con chunksize devuelve un iterador.
-        # Esto significa que no se carga todo el archivo en memoria a la vez.
-        for i, chunk_df in enumerate(pd.read_excel(archivo, chunksize=BATCH_SIZE, sheet_name=sheet_name_to_read)):
+        chunk_counter = 0
+        # Leer el archivo Excel en chunks. pd.read_excel con chunksize devuelve un iterador.
+        for chunk_df in pd.read_excel(archivo, chunksize=BATCH_SIZE, sheet_name=sheet_name_to_read):
+            chunk_counter += 1
             registros_chunk = []
-            logger.info(f"Procesando lote {i+1} con {len(chunk_df)} filas.")
             
-            for _, fila in chunk_df.iterrows():
+            logger.info(f"--- Iniciando procesamiento del CHUNK {chunk_counter} ({len(chunk_df)} filas) ---")
+            
+            for index, fila in chunk_df.iterrows(): # Usamos 'index' para referencia de fila dentro del chunk
                 fecha_raw = fila.get('FECHA')
                 try:
-                    # Usar errors='coerce' para convertir a NaT (Not a Time) si hay errores
-                    # NaT se mapeará a None en la DB para campos DateTime
                     fecha = pd.to_datetime(fecha_raw, errors='coerce') if pd.notnull(fecha_raw) else None
                 except Exception as date_e:
-                    logger.warning(f"Error al convertir fecha '{fecha_raw}': {date_e}. Se usará None.")
+                    logger.warning(f"CHUNK {chunk_counter}, Fila {index+2} (línea Excel): Error al convertir fecha '{fecha_raw}': {date_e}. Se usará None.")
                     fecha = None
 
                 nuevo = Comentarios2024(
                     fecha=fecha,
-                    # Usar .get() con un default vacío y luego strip() es una buena práctica
                     apies=str(fila.get('APIES', '')).strip(),
                     comentario=str(fila.get('COMENTARIO', '')).strip(),
                     canal=str(fila.get('CANAL', '')).strip(),
@@ -310,24 +314,34 @@ def cargar_comentarios_encuesta_2024():
                 db.session.add_all(registros_chunk)
                 db.session.commit()
                 total_registros_guardados += len(registros_chunk)
-                logger.info(f"Lote {i+1} guardado. Total acumulado: {total_registros_guardados}")
+                logger.info(f"CHUNK {chunk_counter} COMPLETO. Guardados {len(registros_chunk)} registros en DB.")
+                logger.info(f"TOTAL DE REGISTROS GUARDADOS HASTA AHORA: {total_registros_guardados}")
+            else:
+                logger.warning(f"CHUNK {chunk_counter} estaba vacío o no contenía registros válidos para guardar.")
             
-            # Es crucial cerrar la sesión y limpiarla después de cada commit para liberar memoria.
-            # db.session.remove() o db.session.close() podrían ser necesarios dependiendo de tu configuración
-            # Si usas Scoped Sessions (común con Flask-SQLAlchemy), db.session.remove() al final del request ya lo haría.
-            # Para asegurar la liberación de memoria en cada lote:
-            db.session.expunge_all() # Desasocia todos los objetos de la sesión para que puedan ser recolectados.
-
-            # Limpiar la lista del chunk para que el recolector de basura actúe más rápido.
+            # Liberar memoria de los objetos del chunk
+            db.session.expunge_all() 
             del registros_chunk 
-            del chunk_df # También ayuda a liberar la referencia al DataFrame del chunk
+            del chunk_df 
+            # Si hay muchos logs de memoria, podrías añadir un gc.collect() aquí, pero suele ser automático.
+            # import gc; gc.collect() 
             
-        logger.info(f"Proceso de carga completado. Se guardaron {total_registros_guardados} comentarios en total.")
+            logger.info(f"--- Memoria del CHUNK {chunk_counter} liberada. ---")
+
+
+        logger.info("======================================================")
+        logger.info("============ PROCESO DE CARGA FINALIZADO =============")
+        logger.info(f"TOTAL DE REGISTROS GUARDADOS EN LA DB: {total_registros_guardados}")
+        logger.info("======================================================")
+        
         return jsonify({'mensaje': f'Se guardaron {total_registros_guardados} comentarios en total.', 'status': 200}), 200
 
     except Exception as e:
         db.session.rollback() # Asegura que la transacción se revierta en caso de error
-        logger.error(f"Error fatal al procesar el archivo Excel: {str(e)}", exc_info=True)
+        logger.error("======================================================")
+        logger.error("============ ERROR FATAL DURANTE LA CARGA ============")
+        logger.error(f"Error: {str(e)}", exc_info=True)
+        logger.error("======================================================")
         return jsonify({'error': f'Error al procesar el archivo: {str(e)}', 'status': 500}), 500
     
 @data_mentor_bp.route('/cargar_comentarios_2025', methods=['POST'])
