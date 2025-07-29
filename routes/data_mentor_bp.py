@@ -22,6 +22,7 @@ import httpx
 from tempfile import NamedTemporaryFile
 import openpyxl
 from io import BytesIO
+from datetime import datetime, timedelta 
 
 
 
@@ -257,48 +258,45 @@ def cargar_comentarios_encuesta_2024():
     """
     Recibe un archivo .xlsx vía form-data (campo: 'file') y guarda sus registros en la DB.
     Optimizado para bajo uso de memoria mediante procesamiento fila a fila con openpyxl.
-    Incluye logs detallados de progreso.
+    Incluye logs de progreso consolidados y tiempo de ejecución en la respuesta.
     """
+    start_time = datetime.now() # Iniciar el temporizador
+
     archivo = request.files.get('file')
     if not archivo:
         logger.error("No se envió ningún archivo en la solicitud.")
         return jsonify({'error': 'No se envió ningún archivo', 'status': 400}), 400
 
     total_registros_guardados = 0
-    BATCH_SIZE = 5000 # Define un tamaño de lote para la DB. Ajusta este valor.
+    BATCH_SIZE = 5000 
+    
+    # Contadores y muestras para errores de fecha
+    date_errors_count = 0
+    sample_date_errors = []
+    MAX_SAMPLE_DATE_ERRORS = 5 # Cuántos ejemplos de errores de fecha guardar
 
     logger.info("======================================================")
     logger.info("============= INICIANDO PROCESO DE CARGA ==============")
     logger.info("======================================================")
+    logger.info(f"Hora de inicio: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"Archivo recibido: '{archivo.filename}' ({archivo.content_length / (1024*1024):.2f} MB)")
     logger.info(f"Tamaño de lote (BATCH_SIZE) para DB: {BATCH_SIZE} filas por commit.")
 
     try:
-        # Convertir el FileStorage de Flask a un BytesIO para openpyxl
-        # openpyxl puede leer directamente desde un objeto BytesIO
         excel_data = BytesIO(archivo.read())
-        
-        # Cargar el workbook (solo el esqueleto, los datos se leen on-demand)
-        # read_only=True y data_only=True son CRUCIALES para bajo consumo de memoria
         workbook = openpyxl.load_workbook(excel_data, read_only=True, data_only=True)
         
-        # Seleccionar la hoja activa (o una por nombre si sabes cuál es)
         if not workbook.sheetnames:
             logger.error("El archivo Excel recibido no contiene hojas.")
             return jsonify({'error': 'El archivo Excel no contiene hojas.', 'status': 400}), 400
         
-        sheet = workbook[workbook.sheetnames[0]] # Accede a la primera hoja por defecto
+        sheet = workbook[workbook.sheetnames[0]] 
         logger.info(f"Se procesará la hoja: '{sheet.title}'")
 
         # Asumimos que la primera fila son los encabezados
-        # Leer los encabezados para mapear nombres de columna a índices
-        headers = [cell.value for cell in sheet[1]] # Fila 1 para encabezados
+        headers = [cell.value for cell in sheet[1]] 
+        header_map = {str(header).strip().upper(): i for i, header in enumerate(headers) if header}
         
-        # Mapear encabezados a índices para acceso más robusto
-        header_map = {header.strip().upper(): i for i, header in enumerate(headers) if header}
-        
-        # Columnas esperadas en tu modelo y sus respectivos encabezados en Excel
-        # Asegúrate de que estos nombres coincidan con tus columnas de Excel (en mayúsculas)
         col_fecha = header_map.get('FECHA')
         col_apies = header_map.get('APIES')
         col_comentario = header_map.get('COMENTARIO')
@@ -306,7 +304,6 @@ def cargar_comentarios_encuesta_2024():
         col_topico = header_map.get('TÓPICO')
         col_sentiment = header_map.get('SENTIMENT')
 
-        # Verificar que las columnas obligatorias existan
         if col_fecha is None or col_apies is None or col_comentario is None or \
            col_canal is None or col_topico is None or col_sentiment is None:
             missing_cols = []
@@ -322,14 +319,14 @@ def cargar_comentarios_encuesta_2024():
             return jsonify({'error': error_msg, 'status': 400}), 400
 
         registros_chunk = []
-        row_counter_total = 0 # Contador para las filas reales del Excel
+        row_counter_total = 0 
         chunk_counter = 0
 
-        # Iterar sobre las filas de la hoja, empezando desde la segunda fila (después del encabezado)
-        for row_index, row in enumerate(sheet.iter_rows(min_row=2)): # min_row=2 para saltar encabezado
+        # Iterar sobre las filas de la hoja, empezando desde la segunda fila
+        # enumerate(..., start=2) para obtener el número de fila real del Excel (incluyendo encabezado)
+        for row_index_excel, row in enumerate(sheet.iter_rows(min_row=2), start=2): 
             row_counter_total += 1
             
-            # Extraer valores de celda de forma segura
             fecha_raw = row[col_fecha].value if col_fecha is not None else None
             apies = row[col_apies].value if col_apies is not None else ''
             comentario = row[col_comentario].value if col_comentario is not None else ''
@@ -337,19 +334,24 @@ def cargar_comentarios_encuesta_2024():
             topico = row[col_topico].value if col_topico is not None else ''
             sentiment = row[col_sentiment].value if col_sentiment is not None else ''
             
+            fecha = None # Inicializar fecha como None
             try:
-                # openpyxl ya devuelve fechas como objetos datetime de Python si están formateadas como tal
-                # No necesitamos pd.to_datetime si openpyxl ya hizo el parsing
-                fecha = fecha_raw
-                if isinstance(fecha, datetime):
-                    pass # Ya es un datetime
-                elif pd.notnull(fecha_raw) and fecha_raw: # Si no es datetime pero tiene valor, intentar parsear
+                if isinstance(fecha_raw, datetime):
+                    fecha = fecha_raw # openpyxl ya lo parseó a datetime
+                elif pd.notnull(fecha_raw) and str(fecha_raw).strip(): # Si tiene valor no nulo y no es string vacío
+                    # Intentar parsear si no es datetime
                     fecha = pd.to_datetime(fecha_raw, errors='coerce') 
-                else:
-                    fecha = None # Si es None o vacío
+                # Si pd.to_datetime con errors='coerce' falla, fecha será NaT, que se convierte en None al asignar
             except Exception as date_e:
-                logger.warning(f"Fila Excel {row_index+2}: Error al convertir fecha '{fecha_raw}': {date_e}. Se usará None.")
-                fecha = None
+                # Solo logear si es un error que no sea solo 'coerce' a NaT, o si queremos más detalle
+                pass # No loguear cada error de fecha individualmente
+            
+            # Contar errores de fecha y guardar una muestra
+            if fecha is pd.NaT: # pd.NaT indica que pd.to_datetime falló y coecionó
+                date_errors_count += 1
+                if len(sample_date_errors) < MAX_SAMPLE_DATE_ERRORS:
+                    sample_date_errors.append(f"Fila {row_index_excel}: '{fecha_raw}'")
+                fecha = None # Asegurarse de que sea None para la DB si falló el parseo
 
             nuevo = Comentarios2024(
                 fecha=fecha,
@@ -364,25 +366,23 @@ def cargar_comentarios_encuesta_2024():
             # Si el chunk alcanza el tamaño definido, lo guardamos en la DB
             if len(registros_chunk) >= BATCH_SIZE:
                 chunk_counter += 1
-                logger.info(f"--- Iniciando commit del CHUNK {chunk_counter} ({len(registros_chunk)} filas) ---")
+                logger.info(f"--- Procesando CHUNK {chunk_counter} (Filas Excel {row_counter_total - len(registros_chunk) + 1} - {row_counter_total}) ---")
                 
                 db.session.add_all(registros_chunk)
                 db.session.commit()
                 total_registros_guardados += len(registros_chunk)
-                logger.info(f"CHUNK {chunk_counter} COMPLETO. Guardados {len(registros_chunk)} registros en DB.")
-                logger.info(f"TOTAL DE REGISTROS GUARDADOS HASTA AHORA: {total_registros_guardados}")
+                logger.info(f"CHUNK {chunk_counter} COMPLETO. Guardados {len(registros_chunk)} registros en DB. Total acumulado: {total_registros_guardados}")
                 
-                # Liberar memoria de los objetos del chunk
                 db.session.expunge_all() 
                 del registros_chunk 
                 registros_chunk = [] # Reiniciar la lista para el siguiente lote
                 
                 logger.info(f"--- Memoria del CHUNK {chunk_counter} liberada. ---")
 
-        # Guardar los registros restantes (el último lote, que puede ser menor que BATCH_SIZE)
+        # Guardar los registros restantes (el último lote)
         if registros_chunk:
             chunk_counter += 1
-            logger.info(f"--- Iniciando commit del CHUNK FINAL {chunk_counter} ({len(registros_chunk)} filas restantes) ---")
+            logger.info(f"--- Procesando CHUNK FINAL {chunk_counter} (Filas Excel {row_counter_total - len(registros_chunk) + 1} - {row_counter_total}) ---")
             db.session.add_all(registros_chunk)
             db.session.commit()
             total_registros_guardados += len(registros_chunk)
@@ -391,21 +391,52 @@ def cargar_comentarios_encuesta_2024():
             db.session.expunge_all()
             del registros_chunk
 
+        end_time = datetime.now() # Finalizar el temporizador
+        time_elapsed = end_time - start_time
+        # Formatear el tiempo de ejecución a HH:MM:SS
+        seconds = int(time_elapsed.total_seconds())
+        time_format = str(timedelta(seconds=seconds))
+
         logger.info("======================================================")
         logger.info("============ PROCESO DE CARGA FINALIZADO ============")
+        logger.info(f"Hora de finalización: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"Tiempo total de ejecución: {time_format}")
         logger.info(f"TOTAL DE FILAS PROCESADAS EN EXCEL: {row_counter_total}")
         logger.info(f"TOTAL DE REGISTROS GUARDADOS EN LA DB: {total_registros_guardados}")
+        if date_errors_count > 0:
+            logger.warning(f"ADVERTENCIA: Se encontraron {date_errors_count} errores al parsear fechas. Ejemplos: {'; '.join(sample_date_errors)}")
         logger.info("======================================================")
         
-        return jsonify({'mensaje': f'Se guardaron {total_registros_guardados} comentarios en total.', 'status': 200}), 200
+        return jsonify({
+            'mensaje': f'Se guardaron {total_registros_guardados} comentarios en total.',
+            'status': 200,
+            'tiempo_de_guardado': time_format,
+            'detalles_procesamiento': {
+                'total_filas_excel_leidas': row_counter_total,
+                'total_registros_db_guardados': total_registros_guardados,
+                'errores_fecha_contados': date_errors_count,
+                'ejemplos_errores_fecha': sample_date_errors if date_errors_count > 0 else "Ninguno"
+            }
+        }), 200
 
     except Exception as e:
-        db.session.rollback() # Asegura que la transacción se revierta en caso de error
+        db.session.rollback() 
+        end_time = datetime.now() # Capturar tiempo de finalización incluso en error
+        time_elapsed_on_error = end_time - start_time
+        seconds_on_error = int(time_elapsed_on_error.total_seconds())
+        time_format_on_error = str(timedelta(seconds=seconds_on_error))
+
         logger.error("======================================================")
         logger.error("============ ERROR FATAL DURANTE LA CARGA ============")
+        logger.error(f"Hora del error: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.error(f"Tiempo transcurrido hasta el error: {time_format_on_error}")
         logger.error(f"Error: {str(e)}", exc_info=True)
         logger.error("======================================================")
-        return jsonify({'error': f'Error al procesar el archivo: {str(e)}', 'status': 500}), 500
+        return jsonify({
+            'error': f'Error al procesar el archivo: {str(e)}', 
+            'status': 500,
+            'tiempo_transcurrido_hasta_error': time_format_on_error
+        }), 500
     
 @data_mentor_bp.route('/cargar_comentarios_2025', methods=['POST'])
 def cargar_comentarios_encuesta_2025():
