@@ -548,7 +548,7 @@ def cargar_comentarios_encuesta_2025():
             sentiment = str(sentiment if sentiment is not None else '').strip()
 
             # Generar hash único para este registro
-            hash_id = Comentarios2025.generar_hash(fecha, apies, comentario, canal) # Usamos el método de tu modelo
+            hash_id = Comentarios2025.generar_hash(fecha, apies, comentario, canal, topico, sentiment)
 
             # Verificar si este hash_id ya fue visto en el archivo ACTUAL (en cualquier lote procesado)
             if hash_id in all_hashes_seen_in_current_file_session:
