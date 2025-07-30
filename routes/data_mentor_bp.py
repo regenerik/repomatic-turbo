@@ -1003,160 +1003,254 @@ def cargar_comentarios_competencia():
 
 
 # LA COMPILACION Y SUBIDA DEL JSON DE TODA LA DATA>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# --- Funciones auxiliares para el proceso asíncrono (mantienen la lógica previa) ---
+from concurrent.futures import ThreadPoolExecutor
+executor = ThreadPoolExecutor(max_workers=5)
+def _wait_for_file_processing(file_id: str):
+    start_time = time.time()
+    max_wait_time = 300 
+    while True:
+        try:
+            file_obj = client.files.retrieve(file_id=file_id)
+            if file_obj.status == "processed":
+                logger.info(f"Archivo {file_id} procesado por OpenAI en {time.time() - start_time:.2f} segundos.")
+                return file_obj
+            elif file_obj.status == "failed":
+                error_message = f"El procesamiento del archivo {file_id} falló en OpenAI. Detalles: {file_obj.last_error.message if file_obj.last_error else 'Desconocido'}. Por favor, revise el archivo y el log de OpenAI."
+                logger.error(error_message)
+                raise Exception(error_message) 
+            else:
+                current_wait_time = time.time() - start_time
+                if current_wait_time > max_wait_time:
+                    error_message = f"Tiempo de espera excedido ({max_wait_time}s) para el procesamiento del archivo {file_id}. Estado actual: {file_obj.status}"
+                    logger.error(error_message)
+                    raise TimeoutError(error_message) 
+                logger.info(f"Archivo {file_id} en estado '{file_obj.status}', esperando... ({current_wait_time:.0f}s / {max_wait_time}s)")
+                time.sleep(5)
+        except Exception as e:
+            logger.error(f"Error al verificar el estado del archivo {file_id}: {e}", exc_info=True)
+            raise 
+
+def _manage_vector_store_async(new_file_id: str, old_file_id: str = None):
+    with data_mentor_bp.app.app_context():
+        try:
+            logger.info(f"Iniciando proceso asíncrono para Vector Store con new_file_id: {new_file_id}")
+            _wait_for_file_processing(new_file_id)
+            
+            vector_store_record = FileDailyID.query.first() 
+
+            if vector_store_record and vector_store_record.current_vector_store_id:
+                vector_store_id = vector_store_record.current_vector_store_id
+                logger.info(f"Actualizando Vector Store existente: {vector_store_id} con el nuevo archivo {new_file_id}")
+                
+                vector_store_file = client.beta.vector_stores.files.create(
+                    vector_store_id=vector_store_id,
+                    file_id=new_file_id
+                )
+                logger.info(f"Archivo {new_file_id} adjuntado al Vector Store {vector_store_id}. Status de adjunción: {vector_store_file.status}")
+
+                start_assimilation_time = time.time()
+                max_assimilation_wait_time = 300 
+                while True:
+                    file_in_vector_store = client.beta.vector_stores.files.retrieve(
+                        vector_store_id=vector_store_id,
+                        file_id=new_file_id
+                    )
+                    if file_in_vector_store.status == "completed":
+                        logger.info(f"Archivo {new_file_id} asimilado en Vector Store {vector_store_id} en {time.time() - start_assimilation_time:.2f} segundos.")
+                        break
+                    elif file_in_vector_store.status in ["failed", "cancelled"]:
+                        error_msg = f"Fallo al asimilar archivo {new_file_id} en Vector Store {vector_store_id}. Estado: {file_in_vector_store.status}. Detalles: {file_in_vector_store.last_error.message if hasattr(file_in_vector_store, 'last_error') and file_in_vector_store.last_error else 'Desconocido'}"
+                        logger.error(error_msg)
+                        raise Exception(error_msg)
+                    
+                    current_assimilation_wait_time = time.time() - start_assimilation_time
+                    if current_assimilation_wait_time > max_assimilation_wait_time:
+                        error_msg = f"Tiempo de espera excedido ({max_assimilation_wait_time}s) para la asimilación del archivo {new_file_id} en Vector Store {vector_store_id}. Estado actual: {file_in_vector_store.status}"
+                        logger.error(error_msg)
+                        raise TimeoutError(error_msg)
+
+                    logger.info(f"Archivo {new_file_id} en Vector Store {vector_store_id} en estado '{file_in_vector_store.status}', esperando asimilación... ({current_assimilation_wait_time:.0f}s / {max_assimilation_wait_time}s)")
+                    time.sleep(5)
+
+                if old_file_id and old_file_id != new_file_id:
+                    try:
+                        logger.info(f"Eliminando archivo antiguo {old_file_id} del Vector Store {vector_store_id}...")
+                        client.beta.vector_stores.files.delete(
+                            vector_store_id=vector_store_id,
+                            file_id=old_file_id
+                        )
+                        logger.info(f"Archivo {old_file_id} eliminado exitosamente del Vector Store {vector_store_id}.")
+                        try:
+                            client.files.delete(old_file_id)
+                            logger.info(f"Archivo antiguo '{old_file_id}' eliminado del storage de OpenAI (general).")
+                        except Exception as e:
+                            logger.warning(f"No se pudo eliminar el archivo antiguo '{old_file_id}' del storage global de OpenAI. Causa: {e}")
+                    except Exception as e:
+                        logger.warning(f"No se pudo eliminar el archivo antiguo {old_file_id} del Vector Store {vector_store_id}. Causa: {e}")
+
+            else:
+                logger.info("Creando un nuevo Vector Store para el nuevo archivo...")
+                vector_store = client.beta.vector_stores.create(
+                    name="Daily Knowledge Base",
+                    file_ids=[new_file_id] 
+                )
+                vector_store_id = vector_store.id
+                logger.info(f"Nuevo Vector Store creado. ID: {vector_store_id}. Archivo {new_file_id} adjuntado.")
+
+                if not vector_store_record:
+                    vector_store_record = FileDailyID(current_file_id=new_file_id, current_vector_store_id=vector_store_id)
+                    db.session.add(vector_store_record)
+                else:
+                    vector_store_record.current_vector_store_id = vector_store_id
+                    vector_store_record.current_file_id = new_file_id 
+                db.session.commit()
+                logger.info(f"Vector Store ID y File ID actualizados en la base de datos a: VS:{vector_store_id}, File:{new_file_id}")
+            
+            logger.info(f"Proceso asíncrono de gestión de Vector Store completado para el archivo {new_file_id}.")
+
+        except Exception as e:
+            db.session.rollback() 
+            logger.error(f"Error fatal en el proceso asíncrono de gestión de Vector Store para archivo {new_file_id}: {e}", exc_info=True)
 
 
 @data_mentor_bp.route("/actualizar-archivos-asistente", methods=["POST"])
 def actualizar_archivos_asistente():
+    start_time = datetime.now()
     tmpfile_path = None
+    
+    # Lista de modelos y sus nombres de sección en el JSON final
+    # ASEGÚRATE de que estos nombres de modelo y atributos .serialize() sean correctos
+    TABLES_TO_INCLUDE = [
+        (Comentarios2025, "comentarios_2025", "total_registros"),
+        (FichasGoogle, "fichas_google", "total_registros"),
+        (FichasGoogleCompetencia, "fichas_google_competencia", "total_registros"),
+        (Usuarios_Por_Asignacion, "usuarios_por_asignacion", "total_registros"),
+        (Usuarios_Sin_ID, "usuarios_sin_id", "total_registros"),
+        (ValidaUsuarios, "valida_usuarios", "total_registros"),
+        (DetalleApies, "detalle_apies", "total_registros"),
+        (AvanceCursada, "avance_cursada", "total_registros"),
+        (DetallesDeCursos, "detalles_de_cursos", "total_registros"),
+        (CursadasAgrupadas, "cursadas_agrupadas", "total_registros"),
+        (FormularioGestor, "formulario_gestor", "total_registros"),
+        (CuartoSurveySql, "cuarto_survey_sql", "total_registros"),
+        (QuintoSurveySql, "quinto_survey_sql", "quinto_survey_sql"), # Ejemplo: si el nombre de la sección es diferente
+        (Comentarios2023, "comentarios_2023", "total_registros"),
+        (Comentarios2024, "comentarios_2024", "total_registros"),
+        (BaseLoopEstaciones, "base_loop_estaciones", "total_registros"),
+        (SalesForce, "sales_force", "total_registros"),
+        (ComentariosCompetencia, "comentarios_competencia", "total_registros")
+    ]
+    
+    # BATCH_SIZE para las consultas a la base de datos (para yield_per)
+    DB_QUERY_BATCH_SIZE = 10000 
+
+    logger.info("======================================================")
+    logger.info("====== INICIANDO PROCESO DE ACTUALIZACIÓN DE ARCHIVO DE CONOCIMIENTO ======")
+    logger.info("======================================================")
+    logger.info(f"Hora de inicio: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info("Recopilando datos de todas las tablas de forma eficiente...")
+
+    content_summary = [] 
+    resumen_conteos_totales = {} 
+
     try:
-        logger.info("Iniciando el proceso de actualización del archivo de conocimiento diario para OpenAI.")
-        logger.info("Recopilando datos de todas las tablas...")
-
-        # --- 1. Recopilar datos de todas las tablas y preparar resumen de contenido ---
-        content_summary = [] # Lista para el resumen de contenido
-
-        # Función auxiliar para serializar y calcular el tamaño de una sección
-        def get_serialized_data_and_size(data_list, section_name):
-            serialized_data = [item.serialize() for item in data_list]
-            # Convertir a JSON string para estimar el tamaño real que ocupará en el archivo
-            json_string = json.dumps(serialized_data, ensure_ascii=False)
-            size_bytes = len(json_string.encode('utf-8')) # Tamaño en bytes
-            size_mb = size_bytes / (1024 * 1024) # Tamaño en MB
-            
-            content_summary.append({
-                "nombre": section_name,
-                "incluido": bool(len(data_list) > 0),
-                "peso_mb": round(size_mb, 4), # Redondear para mejor legibilidad
-                "total_registros": len(data_list)
-            })
-            return serialized_data, len(data_list) # Devolver datos serializados y conteo
-
-        comentarios_2025_serialized, comentarios_2025_count = get_serialized_data_and_size(Comentarios2025.query.all(), "comentarios_2025")
-        fichas_google_serialized, fichas_google_count = get_serialized_data_and_size(FichasGoogle.query.all(), "fichas_google")
-        fichas_google_competencia_serialized, fichas_google_competencia_count = get_serialized_data_and_size(FichasGoogleCompetencia.query.all(), "fichas_google_competencia")
-        usuarios_por_asignacion_serialized, usuarios_por_asignacion_count = get_serialized_data_and_size(Usuarios_Por_Asignacion.query.all(), "usuarios_por_asignacion")
-        usuarios_sin_id_serialized, usuarios_sin_id_count = get_serialized_data_and_size(Usuarios_Sin_ID.query.all(), "usuarios_sin_id")
-        valida_usuarios_serialized, valida_usuarios_count = get_serialized_data_and_size(ValidaUsuarios.query.all(), "valida_usuarios")
-        detalle_apies_serialized, detalle_apies_count = get_serialized_data_and_size(DetalleApies.query.all(), "detalle_apies")
-        avance_cursada_serialized, avance_cursada_count = get_serialized_data_and_size(AvanceCursada.query.all(), "avance_cursada")
-        detalles_de_cursos_serialized, detalles_de_cursos_count = get_serialized_data_and_size(DetallesDeCursos.query.all(), "detalles_de_cursos")
-        cursadas_agrupadas_serialized, cursadas_agrupadas_count = get_serialized_data_and_size(CursadasAgrupadas.query.all(), "cursadas_agrupadas")
-        formulario_gestor_serialized, formulario_gestor_count = get_serialized_data_and_size(FormularioGestor.query.all(), "formulario_gestor")
-        cuarto_survey_sql_serialized, cuarto_survey_sql_count = get_serialized_data_and_size(CuartoSurveySql.query.all(), "cuarto_survey_sql")
-        quinto_survey_sql_serialized, quinto_survey_sql_count = get_serialized_data_and_size(QuintoSurveySql.query.all(), "quinto_survey_sql")
-        comentarios_2023_serialized, comentarios_2023_count = get_serialized_data_and_size(Comentarios2023.query.all(), "comentarios_2023")
-        comentarios_2024_serialized, comentarios_2024_count = get_serialized_data_and_size(Comentarios2024.query.all(), "comentarios_2024")
-        base_loop_estaciones_serialized, base_loop_estaciones_count = get_serialized_data_and_size(BaseLoopEstaciones.query.all(), "base_loop_estaciones")
-        sales_force_serialized, sales_force_count = get_serialized_data_and_size(SalesForce.query.all(), "sales_force")
-        comentarios_competencia_serialized, comentarios_competencia_count = get_serialized_data_and_size(ComentariosCompetencia.query.all(), "comentarios_competencia")
-
-
-        # --- Creación del diccionario JSON final ---
-        data_json = {
-            "descripcion_contenido_archivo": "Este archivo JSON contiene datos operativos y de experiencia del cliente de YPF, organizados por sección. Cada sección (ej., 'comentarios_2025', 'base_loop_estaciones') incluye un campo 'total_registros' y los 'datos' detallados. Se incluye una sección 'resumen_conteos_totales' para acceso directo a los conteos por sección.",
-            "resumen_conteos_totales": { # <--- ¡NUEVA SECCIÓN AGREGADA AQUÍ!
-                "comentarios_2025": comentarios_2025_count,
-                "fichas_google": fichas_google_count,
-                "fichas_google_competencia": fichas_google_competencia_count,
-                "usuarios_por_asignacion": usuarios_por_asignacion_count,
-                "usuarios_sin_id": usuarios_sin_id_count,
-                "valida_usuarios": valida_usuarios_count,
-                "detalle_apies": detalle_apies_count,
-                "avance_cursada": avance_cursada_count,
-                "detalles_de_cursos": detalles_de_cursos_count,
-                "cursadas_agrupadas": cursadas_agrupadas_count,
-                "formulario_gestor": formulario_gestor_count,
-                "cuarto_survey_sql": cuarto_survey_sql_count,
-                "quinto_survey_sql": quinto_survey_sql_count,
-                "comentarios_2023": comentarios_2023_count,
-                "comentarios_2024": comentarios_2024_count,
-                "base_loop_estaciones": base_loop_estaciones_count,
-                "sales_force": sales_force_count,
-                "comentarios_competencia": comentarios_competencia_count
-            },
-            "comentarios_2025": {
-                "total_registros": comentarios_2025_count,
-                "datos": comentarios_2025_serialized
-            },
-            "fichas_google": {
-                "total_registros": fichas_google_count,
-                "datos": fichas_google_serialized
-            },
-            "fichas_google_competencia": {
-                "total_registros": fichas_google_competencia_count,
-                "datos": fichas_google_competencia_serialized
-            },
-            "usuarios_por_asignacion": {
-                "total_registros": usuarios_por_asignacion_count,
-                "datos": usuarios_por_asignacion_serialized
-            },
-            "usuarios_sin_id": {
-                "total_registros": usuarios_sin_id_count,
-                "datos": usuarios_sin_id_serialized
-            },
-            "valida_usuarios": {
-                "total_registros": valida_usuarios_count,
-                "datos": valida_usuarios_serialized
-            },
-            "detalle_apies": {
-                "total_registros": detalle_apies_count,
-                "datos": detalle_apies_serialized
-            },
-            "avance_cursada": {
-                "total_registros": avance_cursada_count,
-                "datos": avance_cursada_serialized
-            },
-            "detalles_de_cursos": {
-                "total_registros": detalles_de_cursos_count,
-                "datos": detalles_de_cursos_serialized
-            },
-            "cursadas_agrupadas": {
-                "total_registros": cursadas_agrupadas_count,
-                "datos": cursadas_agrupadas_serialized
-            },
-            "formulario_gestor": {
-                "total_registros": formulario_gestor_count,
-                "datos": formulario_gestor_serialized
-            },
-            "cuarto_survey_sql": {
-                "total_registros": cuarto_survey_sql_count,
-                "datos": cuarto_survey_sql_serialized
-            },
-            "quinto_survey_sql": {
-                "total_registros": quinto_survey_sql_count,
-                "datos": quinto_survey_sql_serialized
-            },
-            "comentarios_2023": {
-                "total_registros": comentarios_2023_count,
-                "datos": comentarios_2023_serialized
-            },
-            "comentarios_2024": {
-                "total_registros": comentarios_2024_count,
-                "datos": comentarios_2024_serialized
-            },
-            "base_loop_estaciones": {
-                "total_registros": base_loop_estaciones_count,
-                "datos": base_loop_estaciones_serialized
-            },
-            "sales_force": {
-                "total_registros": sales_force_count,
-                "datos": sales_force_serialized
-            },
-            "comentarios_competencia": {
-                "total_registros": comentarios_competencia_count,
-                "datos": comentarios_competencia_serialized
-            }
-        }
-
         with NamedTemporaryFile(mode="w+", delete=False, suffix=".json", encoding="utf-8") as tmpfile:
-            json.dump(data_json, tmpfile, indent=2, ensure_ascii=False)
-            tmpfile.flush()
             tmpfile_path = tmpfile.name
-        
-        file_size = os.path.getsize(tmpfile_path) / (1024 * 1024)
-        logger.info(f"Tamaño final del archivo JSON temporal: {file_size:.2f} MB")
+            
+            tmpfile.write('{\n')
+            tmpfile.write('  "descripcion_contenido_archivo": "Este archivo JSON contiene datos operativos y de experiencia del cliente de YPF, organizados por sección. Cada sección incluye conteos y datos detallados. La sección \\"resumen_conteos_totales\\" provee acceso directo a los conteos por sección.",\n')
+            
+            logger.info("Recopilando conteos totales para el resumen...")
+            for Model, section_name, _ in TABLES_TO_INCLUDE:
+                count = db.session.query(Model).count()
+                resumen_conteos_totales[section_name] = count
+                logger.info(f"  - {section_name}: {count} registros.")
+            
+            # --- CORRECCIÓN DE SYNTAXERROR ---
+            # Hacemos el json.dumps y los .replace en una variable separada
+            # para evitar el backslash dentro del f-string directamente.
+            conteos_json_str = json.dumps(resumen_conteos_totales, indent=2, ensure_ascii=False)
+            # Ajustar la indentación para que los '{' y '}' de resumen_conteos_totales estén alineados
+            conteos_json_str_formatted = conteos_json_str.replace("{\n ", "{\n    ").replace("\n}", "\n  }")
+            tmpfile.write(f'  "resumen_conteos_totales": {conteos_json_str_formatted},\n')
+            # --- FIN CORRECCIÓN ---
 
-        # --- 2. Subir el nuevo archivo JSON a OpenAI ---
+            first_section = True
+            for Model, section_name, count_key in TABLES_TO_INCLUDE:
+                if not first_section:
+                    tmpfile.write(',\n') 
+                else:
+                    first_section = False
+
+                logger.info(f"Procesando sección '{section_name}'...")
+                
+                tmpfile.write(f'  "{section_name}": {{\n')
+                tmpfile.write(f'    "total_registros": {resumen_conteos_totales[section_name]},\n')
+                tmpfile.write('    "datos": [\n')
+
+                record_count_in_section = 0
+                is_first_record_in_section = True
+
+                offset = 0
+                while True:
+                    batch_of_records = db.session.query(Model).limit(DB_QUERY_BATCH_SIZE).offset(offset).all()
+                    if not batch_of_records:
+                        break 
+                    
+                    for item in batch_of_records:
+                        if not is_first_record_in_section:
+                            tmpfile.write(',\n')
+                        else:
+                            is_first_record_in_section = False
+                        
+                        json.dump(item.serialize(), tmpfile, indent=4, ensure_ascii=False)
+                        record_count_in_section += 1
+                    
+                    offset += DB_QUERY_BATCH_SIZE
+                    logger.info(f"  - '{section_name}': {record_count_in_section} registros procesados hasta ahora. Memoria liberada.")
+                    
+                    # db.session.expunge_all() # Desasocia objetos del lote para liberar memoria
+                    # db.session.close() # Podría cerrar la conexión, Flask-SQLAlchemy lo maneja diferente.
+                    # Si estás usando Flask-SQLAlchemy con Scoped Sessions, el `remove()` al final del request es mejor.
+                    # Para forzar la liberación en un bucle largo:
+                    db.session.rollback() # Limpia la sesión y libera objetos
+                    # O si no quieres rollback para no perder estado de objetos no relacionados
+                    # for obj in batch_of_records:
+                    #     db.session.expunge(obj)
+                    # del batch_of_records # Explicitamente borrar referencia al lote
+
+                tmpfile.write('\n    ]\n') 
+                tmpfile.write('  }') 
+                
+                content_summary.append({
+                    "nombre": section_name,
+                    "incluido": True, 
+                    "peso_mb": "Calculado al final", 
+                    "total_registros": record_count_in_section
+                })
+                logger.info(f"Sección '{section_name}' finalizada con {record_count_in_section} registros.")
+
+            tmpfile.write('\n}') 
+            tmpfile.flush()
+            tmpfile.close() 
+        
+        file_size_bytes = os.path.getsize(tmpfile_path)
+        file_size_mb = file_size_bytes / (1024 * 1024)
+        logger.info(f"Tamaño final del archivo JSON temporal: {file_size_mb:.2f} MB ({file_size_bytes} bytes)")
+
+        if file_size_bytes == 0:
+            error_message = "El archivo JSON generado está vacío (0 bytes). No se puede subir a OpenAI para File Search."
+            logger.error(error_message)
+            return jsonify({
+                "success": False,
+                "message": error_message,
+                "final_file_size_mb": 0,
+                "contenido_incluido": content_summary
+            }), 400
+
+        # ... (El resto del código para subir a OpenAI y gestionar Vector Store es el mismo) ...
+        # (Se mantiene la lógica de _manage_vector_store_async)
         logger.info("Subiendo el nuevo archivo JSON a OpenAI...")
         with open(tmpfile_path, "rb") as file_to_upload:
             uploaded_file = client.files.create(
@@ -1166,42 +1260,62 @@ def actualizar_archivos_asistente():
         new_file_id = uploaded_file.id
         logger.info(f"Nuevo archivo JSON subido con éxito. File ID: {new_file_id}")
 
-        # --- 3. Eliminar archivo existente previamente de OpenAI (si lo hay) ---
         existing_file_record = FileDailyID.query.first()
-
+        old_file_id = None
+        
         if existing_file_record:
             old_file_id = existing_file_record.current_file_id
-            logger.info(f"Se encontró un archivo antiguo para eliminar con ID: {old_file_id}")
-            try:
-                client.files.delete(old_file_id)
-                logger.info(f"Archivo antiguo '{old_file_id}' eliminado exitosamente de OpenAI.")
-            except Exception as e:
-                logger.warning(f"No se pudo eliminar el archivo antiguo '{old_file_id}' de OpenAI. Causa: {e}")
+            logger.info(f"Se encontró un registro existente en la DB. Old File ID: {old_file_id}")
             
             existing_file_record.current_file_id = new_file_id
             db.session.add(existing_file_record)
             db.session.commit()
             logger.info(f"ID de archivo actualizado en la base de datos a: {new_file_id}")
         else:
-            logger.info("No se encontró un archivo anterior registrado en la base de datos.")
+            logger.info("No se encontró un archivo anterior registrado en la base de datos. Creando nuevo registro.")
             new_record = FileDailyID(
                 current_file_id=new_file_id,
+                current_vector_store_id=None 
             )
             db.session.add(new_record)
             db.session.commit()
             logger.info(f"Nuevo registro de ID de archivo creado en la base de datos: {new_file_id}")
+        
+        executor.submit(_manage_vector_store_async, new_file_id, old_file_id)
+        logger.info(f"Proceso de gestión de Vector Store iniciado en segundo plano para el archivo {new_file_id}.")
 
-        return jsonify({
+        end_time = datetime.now()
+        time_elapsed = end_time - start_time
+        seconds = int(time_elapsed.total_seconds())
+        time_format = str(timedelta(seconds=seconds))
+
+        response_message = {
             "success": True,
-            "message": "Archivo de conocimiento diario actualizado y gestionado exitosamente.",
+            "message": "Archivo de conocimiento diario recibido y proceso de actualización de OpenAI iniciado en segundo plano.",
             "new_file_id": new_file_id,
-            "final_file_size_mb": round(file_size, 4), # <-- Tamaño del archivo final
-            "contenido_incluido": content_summary # <-- Resumen detallado del contenido
-        }), 200
+            "old_file_id_replaced": old_file_id if old_file_id else "N/A",
+            "process_status": "El archivo se está subiendo y procesando. La creación/actualización del Vector Store se gestiona asíncronamente.",
+            "final_file_size_mb": round(file_size_mb, 4),
+            "tiempo_de_generacion_archivo_local": time_format, 
+            "contenido_incluido": content_summary 
+        }
+        logger.info(f"Respuesta enviada al cliente. Detalles: {json.dumps(response_message, indent=2, ensure_ascii=False)}")
+        return jsonify(response_message), 200
 
     except Exception as e:
-        logger.error("Error en la gestión del archivo de conocimiento diario para OpenAI", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        db.session.rollback() 
+        end_time = datetime.now() 
+        time_elapsed_on_error = end_time - start_time
+        seconds_on_error = int(time_elapsed_on_error.total_seconds())
+        time_format_on_error = str(timedelta(seconds=seconds_on_error))
+
+        logger.error("======================================================")
+        logger.error("============ ERROR FATAL DURANTE LA CARGA ============")
+        logger.error(f"Hora del error: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.error(f"Tiempo transcurrido hasta el error: {time_format_on_error}")
+        logger.error(f"Error: {str(e)}", exc_info=True)
+        logger.error("======================================================")
+        return jsonify({"error": str(e), "status": 500}), 500
     finally:
         if tmpfile_path and os.path.exists(tmpfile_path):
             try:
