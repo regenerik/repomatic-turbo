@@ -887,14 +887,32 @@ class ComentariosCompetencia(db.Model):
 # CLASES PARA QUE FUNCIONE DATA MENTOR Y EL CHAT EN GENERAL >>  Y los modificables de la info extra que recibe la IA>>>>>
 
 class FileDailyID(db.Model):
-    __tablename__ = 'file_daily_id'
-    id = db.Column(db.Integer, primary_key=True)
-    current_file_id = db.Column(db.String, unique=True, nullable=False)
-    timestamp = db.Column(db.DateTime, default=db.func.current_timestamp())
+    __tablename__ = 'file_daily_id' 
 
+    id = db.Column(db.Integer, primary_key=True)
+    current_file_id = db.Column(db.String(255), unique=True, nullable=False)
+    
+    # ¡ESTA ES LA COLUMNA QUE NECESITAS AÑADIR!
+    current_vector_store_id = db.Column(db.String(255), nullable=True) 
+    
+    # Buenas prácticas para timestamps
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     def __repr__(self):
-        return f"<FileDailyID id={self.id}>"
+        # Incluye el vector_store_id para mejor visibilidad en la representación
+        return f"<FileDailyID id={self.id}, file_id={self.current_file_id}, vs_id={self.current_vector_store_id}>"
+
+    # Puedes añadir un método serialize si necesitas exponer esta tabla vía API
+    def serialize(self):
+        return {
+            'id': self.id,
+            'current_file_id': self.current_file_id,
+            'current_vector_store_id': self.current_vector_store_id,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }
+
 
 
 class InstruccionesGenerales(db.Model):
