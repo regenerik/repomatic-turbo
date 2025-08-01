@@ -1113,7 +1113,6 @@ def _manage_vector_store_async(new_file_id: str, old_file_id: str = None):
             db.session.rollback() 
             logger.error(f"Error fatal en el proceso asíncrono de gestión de Vector Store para archivo {new_file_id}: {e}", exc_info=True)
 
-
 @data_mentor_bp.route("/actualizar-archivos-asistente", methods=["POST"])
 def actualizar_archivos_asistente():
     start_time = datetime.now()
@@ -1331,8 +1330,8 @@ def actualizar_archivos_asistente():
 # >>>>> NUEVA RUTA SIMPLIFICADA PARA PRUEBAS DE FORMATO Y TAMAÑO >>>>>
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
-@data_mentor_bp.route("/test-comentarios-2025-csv", methods=["POST"])
-def test_comentarios_2025_csv():
+@data_mentor_bp.route("/test-comentarios-2025-txt", methods=["POST"])
+def test_comentarios_2025_txt():
     start_time = datetime.now()
     tmpfile_path = None
     
@@ -1340,7 +1339,7 @@ def test_comentarios_2025_csv():
     DB_QUERY_BATCH_SIZE = 10000 
 
     logger.info("======================================================")
-    logger.info("===== INICIANDO PRUEBA CON UN SOLO ARCHIVO CSV =====")
+    logger.info("===== INICIANDO PRUEBA CON UN SOLO ARCHIVO TXT =====")
     logger.info("======================================================")
     logger.info(f"Hora de inicio: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
@@ -1349,56 +1348,56 @@ def test_comentarios_2025_csv():
         count = db.session.query(Model).count()
         logger.info(f"Tabla a procesar: '{section_name}' con {count} registros.")
 
-        # --- 1. Crear el archivo CSV de forma incremental ---
-        with NamedTemporaryFile(mode="w+", delete=False, suffix=".csv", encoding="utf-8", newline='') as tmpfile:
+        # --- 1. Crear el archivo TXT de forma incremental ---
+        with NamedTemporaryFile(mode="w+", delete=False, suffix=".txt", encoding="utf-8") as tmpfile:
             tmpfile_path = tmpfile.name
             
-            offset = 0
-            is_first_batch = True
+            # Escribir el encabezado del documento
+            tmpfile.write("A continuación se presenta un listado de comentarios de 2025. Cada línea representa un registro de la base de datos.\n\n")
             
+            offset = 0
             while True:
                 batch_of_records = db.session.query(Model).limit(DB_QUERY_BATCH_SIZE).offset(offset).all()
                 if not batch_of_records:
                     break 
 
-                # Convertir el lote a un DataFrame
-                batch_df = pd.DataFrame([item.serialize() for item in batch_of_records])
-                
-                # Escribir el DataFrame al CSV
-                # header=True solo para el primer lote, para el resto es False
-                batch_df.to_csv(tmpfile, mode='a', index=False, header=is_first_batch, encoding='utf-8')
-                
-                if is_first_batch:
-                    is_first_batch = False
+                for item in batch_of_records:
+                    # Serializar cada registro a una línea de texto
+                    # Aquí convertimos el dict serializado a string para el TXT
+                    line = json.dumps(item.serialize(), ensure_ascii=False)
+                    tmpfile.write(line + '\n')
                 
                 offset += DB_QUERY_BATCH_SIZE
                 logger.info(f"  - '{section_name}': {offset} registros procesados hasta ahora. Memoria liberada.")
-                db.session.remove() # Limpiar la sesión después de cada lote
+                db.session.remove()
+
+            # Escribir el pie de página
+            tmpfile.write(f"\nFIN de los comentarios de 2025. Total de registros: {offset}.")
 
             tmpfile.flush()
             tmpfile.close() 
         
         file_size_bytes = os.path.getsize(tmpfile_path)
         file_size_mb = file_size_bytes / (1024 * 1024)
-        logger.info(f"Tamaño final del archivo CSV temporal: {file_size_mb:.2f} MB ({file_size_bytes} bytes)")
+        logger.info(f"Tamaño final del archivo TXT temporal: {file_size_mb:.2f} MB ({file_size_bytes} bytes)")
 
         if file_size_bytes == 0:
-            error_message = "El archivo CSV generado está vacío (0 bytes). No se puede subir a OpenAI para File Search."
+            error_message = "El archivo TXT generado está vacío (0 bytes). No se puede subir a OpenAI para File Search."
             logger.error(error_message)
             return jsonify({"success": False, "message": error_message, "final_file_size_mb": 0}), 400
 
-        # --- 2. Subir el nuevo archivo CSV a OpenAI ---
-        logger.info("Subiendo el nuevo archivo CSV a OpenAI...")
+        # --- 2. Subir el nuevo archivo TXT a OpenAI ---
+        logger.info("Subiendo el nuevo archivo TXT a OpenAI...")
         with open(tmpfile_path, "rb") as file_to_upload:
             uploaded_file = client.files.create(
                 file=file_to_upload,
                 purpose="assistants"
             )
         new_file_id = uploaded_file.id
-        logger.info(f"Nuevo archivo CSV subido con éxito. File ID: {new_file_id}")
+        logger.info(f"Nuevo archivo TXT subido con éxito. File ID: {new_file_id}")
 
-        # --- 3. Gestionar el ID del archivo y Vector Store en la DB local ---
-        # (Aquí usamos la misma lógica que en la ruta principal)
+        # (El resto de la lógica para la DB y el proceso asíncrono se mantiene igual)
+
         existing_file_record = FileDailyID.query.first()
         old_file_id = None
         
@@ -1416,7 +1415,6 @@ def test_comentarios_2025_csv():
             db.session.commit()
             logger.info(f"Nuevo registro de ID de archivo creado en la base de datos: {new_file_id}")
         
-        # --- 4. Ejecutar el proceso de vectorización en segundo plano ---
         executor.submit(_manage_vector_store_async, new_file_id, old_file_id)
         logger.info(f"Proceso de gestión de Vector Store iniciado en segundo plano para el archivo {new_file_id}.")
 
@@ -1427,7 +1425,7 @@ def test_comentarios_2025_csv():
 
         response_message = {
             "success": True,
-            "message": "Archivo de prueba CSV recibido y proceso de vectorización iniciado en segundo plano.",
+            "message": "Archivo de prueba TXT recibido y proceso de vectorización iniciado en segundo plano.",
             "new_file_id": new_file_id,
             "final_file_size_mb": round(file_size_mb, 4),
             "tiempo_de_generacion_archivo_local": time_format, 
