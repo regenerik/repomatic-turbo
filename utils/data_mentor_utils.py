@@ -28,17 +28,46 @@ client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 def query_assistant_mentor(prompt: str, thread_id: Optional[str] = None) -> Tuple[str, str]:
     logger.info('Entró al util query_assistant_mentor')
     
-    # 1. Obtener el ID del archivo de conocimiento diario más reciente (FileDailyID ya no tiene la guía)
+    # 1. Obtener el ID del Vector Store más reciente desde la DB.
+    #    (Ya no necesitamos los file_ids individuales para el chat).
     daily_file_record = FileDailyID.query.first()
-    if not daily_file_record:
-        logger.error("No se encontró el ID del archivo de conocimiento diario en la base de datos.")
-        raise RuntimeError("No se encontró la base de conocimiento diaria. Por favor, asegúrese de ejecutar la ruta de actualización de archivos.")
+    if not daily_file_record or not daily_file_record.current_vector_store_id:
+        logger.error("No se encontró el ID del Vector Store en la base de datos.")
+        raise RuntimeError("No se encontró una base de conocimiento activa. Por favor, asegúrese de ejecutar la ruta de actualización de archivos.")
     
-    current_knowledge_file_id = daily_file_record.current_file_id
-    logger.info(f"Usando archivo de conocimiento con ID recuperado de DB: {current_knowledge_file_id}")
-
-    # --- NUEVO: CONSTRUCCIÓN DINÁMICA DE LA GUÍA DE USO DE DATOS DESDE LA DB EN CADA CHAT ---
+    current_vector_store_id = daily_file_record.current_vector_store_id
+    logger.info(f"Usando Vector Store con ID recuperado de DB: {current_vector_store_id}")
+    
+    # 2. Asegurar que el Assistant esté configurado con el Vector Store correcto.
+    #    Este paso es CRUCIAL para que el asistente sepa dónde buscar.
     try:
+        assistant = client.beta.assistants.retrieve(ASSISTANT_ID)
+        
+        # Verificar si la configuración actual del asistente coincide con el ID de la DB.
+        current_vs_ids = assistant.tool_resources.file_search.vector_store_ids if assistant.tool_resources.file_search else []
+        if current_vs_ids != [current_vector_store_id]:
+            logger.info(f"El Assistant ({ASSISTANT_ID}) NO tiene el Vector Store ({current_vector_store_id}) adjunto. Actualizando...")
+            
+            client.beta.assistants.update(
+                assistant_id=ASSISTANT_ID,
+                tool_resources={
+                    "file_search": {
+                        "vector_store_ids": [current_vector_store_id]
+                    }
+                }
+            )
+            logger.info("Assistant actualizado exitosamente con el nuevo Vector Store.")
+        else:
+            logger.info("Assistant ya está configurado con el Vector Store más reciente. No se requiere actualización.")
+            
+    except Exception as e:
+        logger.error(f"Error al verificar/actualizar el Assistant con el Vector Store: {e}", exc_info=True)
+        raise RuntimeError(f"Error al configurar el Assistant con la base de conocimiento: {str(e)}")
+
+
+    # 3. Construir dinámicamente la guía de uso (sin cambios, tu código está bien aquí)
+    try:
+        # (Tu código para construir full_guide_text_for_ai va aquí, sin cambios)
         general_instructions = InstruccionesGenerales.query.first()
         if not general_instructions:
             raise RuntimeError("No se encontraron instrucciones generales en la base de datos para la IA. Por favor, cargue los datos iniciales de las instrucciones.")
@@ -55,97 +84,51 @@ def query_assistant_mentor(prompt: str, thread_id: Optional[str] = None) -> Tupl
             section_name = inst_ind.name
             
             guide_text_parts.append(f"\n- Sección: '{section_name}'")
-            guide_text_parts.append(f"  Descripción: {inst_ind.descripcion}")
+            guide_text_parts.append(f"  Descripción: {inst_ind.descripcion}")
             
-            relaciones = inst_ind.get_relaciones_clave_dict() # Usa el método para obtener el dict
+            relaciones = inst_ind.get_relaciones_clave_dict() 
             if relaciones:
-                guide_text_parts.append(f"  Relaciones Clave:")
+                guide_text_parts.append(f"  Relaciones Clave:")
                 for rel_key, rel_desc in relaciones.items():
-                    guide_text_parts.append(f"    - {rel_key}: {rel_desc}")
+                    guide_text_parts.append(f"    - {rel_key}: {rel_desc}")
             if inst_ind.ejemplo_consulta:
-                guide_text_parts.append(f"  Ejemplo de Consulta: {inst_ind.ejemplo_consulta}")
+                guide_text_parts.append(f"  Ejemplo de Consulta: {inst_ind.ejemplo_consulta}")
 
         guide_text_parts.append("\nINSTRUCCIONES ESPECÍFICAS DE BÚSQUEDA PARA LA IA:")
         guide_text_parts.append(general_instructions.instrucciones_especificas_para_ia)
 
         full_guide_text_for_ai = "\n".join(guide_text_parts)
-        # FIN DE LA CONSTRUCCIÓN DE LA GUÍA DINÁMICA
-        
     except Exception as e:
         logger.error(f"Error al construir la guía de IA desde la base de datos: {e}", exc_info=True)
         raise RuntimeError(f"Error al construir la guía de la IA: {str(e)}")
 
-    # --- Verificación del estado del procesamiento del archivo (mantenemos esto) ---
-    try:
-        file_status_check_limit = 10 
-        file_is_processed = False
-        
-        for _ in range(file_status_check_limit):
-            file_obj = client.files.retrieve(current_knowledge_file_id)
-            logger.info(f"Estado de procesamiento del archivo {current_knowledge_file_id}: {file_obj.status}")
-            
-            if file_obj.status == "processed":
-                file_is_processed = True
-                break
-            elif file_obj.status == "failed":
-                logger.error(f"El archivo {current_knowledge_file_id} falló su procesamiento en OpenAI. Detalles: {file_obj.error}")
-                raise RuntimeError(f"El archivo de conocimiento ({current_knowledge_file_id}) falló su procesamiento en OpenAI. Por favor, revise el archivo o contacte a soporte si persiste.")
-            
-            time.sleep(2) 
 
-        if not file_is_processed:
-            logger.warning(f"El archivo {current_knowledge_file_id} aún no está 'processed' después de {file_status_check_limit} intentos. Estado actual: {file_obj.status}")
-            raise RuntimeError("La base de conocimiento aún se está procesando. Por favor, inténtelo de nuevo en unos minutos.")
-
-    except Exception as e:
-        logger.error(f"Error al verificar el estado del archivo {current_knowledge_file_id}: {e}", exc_info=True)
-        raise RuntimeError(f"Error al verificar la disponibilidad de la base de conocimiento: {str(e)}")
-
-
-    # Configuración de los adjuntos para el mensaje
-    attachments = [
-        {
-            "file_id": current_knowledge_file_id,
-            "tools": [{"type": "file_search"}]
-        }
-    ]
-
+    # 4. Crear o continuar el Thread (sin adjuntar nada, ya que el Assistant está configurado)
     current_thread_id = thread_id
 
     try:
         if not current_thread_id:
             logger.info('thread_id vino SIN contenido (charla nueva). Creando un nuevo hilo...')
-            logger.info(f"DEBUG: Creando nuevo Thread. Adjuntando file_id: {current_knowledge_file_id}")
-            
             thread = client.beta.threads.create(
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt,
-                        "attachments": attachments
-                    }
-                ]
+                messages=[{"role": "user", "content": prompt}]
             )
             current_thread_id = thread.id
             logger.info(f"Nuevo Thread creado con ID: {current_thread_id}")
         else:
             logger.info(f"thread_id vino con contenido. Continuar hilo existente: {current_thread_id}...")
-            logger.info(f"DEBUG: Añadiendo mensaje a Thread existente. Adjuntando file_id: {current_knowledge_file_id}")
-            
             client.beta.threads.messages.create(
                 thread_id=current_thread_id,
                 role="user",
                 content=prompt,
-                attachments=attachments
             )
-            logger.info(f"Mensaje y archivo adjunto al Thread: {current_thread_id}")
+            logger.info(f"Mensaje añadido al Thread: {current_thread_id}")
 
         logger.info(f"Creando o continuando run para el Thread: {current_thread_id} con Assistant ID: {ASSISTANT_ID}")
         
         run = client.beta.threads.runs.create(
             thread_id=current_thread_id,
             assistant_id=ASSISTANT_ID,
-            additional_instructions=full_guide_text_for_ai # <--- ¡Aquí se pasa la guía construida al momento!
+            additional_instructions=full_guide_text_for_ai
         )
         run_id = run.id
         logger.info(f"Run creado con ID: {run_id}. Estado inicial: {run.status}")
