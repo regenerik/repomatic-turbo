@@ -1326,129 +1326,258 @@ def actualizar_archivos_asistente():
                 logger.error(f"Error inesperado al eliminar el archivo temporal en el finally block: {final_e}")
 
 
-# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-# >>>>> NUEVA RUTA SIMPLIFICADA PARA PRUEBAS DE FORMATO Y TAMAÑO >>>>>
-# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+def _wait_for_file_processing(file_id: str):
+    """Espera a que un archivo en OpenAI cambie su estado a 'processed'."""
+    start_time = time.time()
+    max_wait_time = 300 
+    while True:
+        try:
+            file_obj = client.files.retrieve(file_id=file_id)
+            if file_obj.status == "processed":
+                logger.info(f"Archivo {file_id} procesado por OpenAI en {time.time() - start_time:.2f} segundos.")
+                return file_obj
+            elif file_obj.status == "failed":
+                error_message = f"El procesamiento del archivo {file_id} falló en OpenAI. Detalles: {file_obj.last_error.message if file_obj.last_error else 'Desconocido'}."
+                logger.error(error_message)
+                raise Exception(error_message) 
+            else:
+                current_wait_time = time.time() - start_time
+                if current_wait_time > max_wait_time:
+                    error_message = f"Tiempo de espera excedido ({max_wait_time}s) para el procesamiento del archivo {file_id}. Estado actual: {file_obj.status}"
+                    logger.error(error_message)
+                    raise TimeoutError(error_message) 
+                logger.info(f"Archivo {file_id} en estado '{file_obj.status}', esperando... ({current_wait_time:.0f}s / {max_wait_time}s)")
+                time.sleep(5)
+        except Exception as e:
+            logger.error(f"Error al verificar el estado del archivo {file_id}: {e}", exc_info=True)
+            raise 
 
-@data_mentor_bp.route("/test-comentarios-2025-txt", methods=["POST"])
-def test_comentarios_2025_txt():
+def _wait_for_vector_store_completion(vector_store_id: str):
+    """Espera a que un Vector Store termine de asimilar todos sus archivos."""
+    start_time = time.time()
+    max_wait_time = 600 # Aumentar el tiempo de espera para el Vector Store
+    while True:
+        try:
+            vector_store = client.beta.vector_stores.retrieve(vector_store_id)
+            # El estado 'completed' es la confirmación
+            if vector_store.status == "completed":
+                logger.info(f"Vector Store {vector_store_id} completado en {time.time() - start_time:.2f} segundos.")
+                return vector_store
+            elif vector_store.status in ["failed", "cancelled"]:
+                error_message = f"La creación del Vector Store {vector_store_id} falló. Estado: {vector_store.status}."
+                logger.error(error_message)
+                raise Exception(error_message)
+            else:
+                current_wait_time = time.time() - start_time
+                if current_wait_time > max_wait_time:
+                    error_message = f"Tiempo de espera excedido ({max_wait_time}s) para la creación del Vector Store {vector_store_id}."
+                    logger.error(error_message)
+                    raise TimeoutError(error_message)
+                logger.info(f"Vector Store {vector_store_id} en estado '{vector_store.status}', esperando... ({current_wait_time:.0f}s / {max_wait_time}s)")
+                time.sleep(10) # Esperar un poco más para este proceso
+        except Exception as e:
+            logger.error(f"Error al verificar el estado del Vector Store {vector_store_id}: {e}", exc_info=True)
+            raise
+
+# -------------------------------------------------------------------------
+# RUTA PRINCIPAL CON LA NUEVA LÓGICA DE SUBDIVISIÓN Y VECTORIZACIÓN
+# -------------------------------------------------------------------------
+
+@data_mentor_bp.route("/actualizar-comentarios-2025-subdividido", methods=["POST"])
+def actualizar_comentarios_2025_subdividido():
     start_time = datetime.now()
-    tmpfile_path = None
-    
-    TABLE_TO_INCLUDE = (Comentarios2025, "comentarios_2025")
-    DB_QUERY_BATCH_SIZE = 10000 
+    temp_dir = 'temp_openai_uploads'
+    uploaded_file_ids = []
+    vector_store_id = None
 
+    # Parámetros para la creación de archivos
+    MAX_FILE_SIZE_MB = 10
+    DB_QUERY_BATCH_SIZE = 10000 
+    
     logger.info("======================================================")
-    logger.info("===== INICIANDO PRUEBA CON UN SOLO ARCHIVO TXT =====")
+    logger.info("===== INICIANDO PROCESO SUBDIVIDIDO DE COMENTARIOS 2025 =====")
     logger.info("======================================================")
     logger.info(f"Hora de inicio: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"Tamaño máximo por archivo: {MAX_FILE_SIZE_MB} MB")
 
     try:
-        Model, section_name = TABLE_TO_INCLUDE
-        count = db.session.query(Model).count()
-        logger.info(f"Tabla a procesar: '{section_name}' con {count} registros.")
-
-        # --- 1. Crear el archivo TXT de forma incremental ---
-        with NamedTemporaryFile(mode="w+", delete=False, suffix=".txt", encoding="utf-8") as tmpfile:
-            tmpfile_path = tmpfile.name
-            
-            # Escribir el encabezado del documento
-            tmpfile.write("A continuación se presenta un listado de comentarios de 2025. Cada línea representa un registro de la base de datos.\n\n")
-            
-            offset = 0
-            while True:
-                batch_of_records = db.session.query(Model).limit(DB_QUERY_BATCH_SIZE).offset(offset).all()
-                if not batch_of_records:
-                    break 
-
-                for item in batch_of_records:
-                    # Serializar cada registro a una línea de texto
-                    # Aquí convertimos el dict serializado a string para el TXT
-                    line = json.dumps(item.serialize(), ensure_ascii=False)
-                    tmpfile.write(line + '\n')
-                
-                offset += DB_QUERY_BATCH_SIZE
-                logger.info(f"  - '{section_name}': {offset} registros procesados hasta ahora. Memoria liberada.")
-                db.session.remove()
-
-            # Escribir el pie de página
-            tmpfile.write(f"\nFIN de los comentarios de 2025. Total de registros: {offset}.")
-
-            tmpfile.flush()
-            tmpfile.close() 
+        if not os.path.exists(temp_dir):
+            os.makedirs(temp_dir)
+            logger.info(f"Directorio temporal creado: {temp_dir}")
         
-        file_size_bytes = os.path.getsize(tmpfile_path)
-        file_size_mb = file_size_bytes / (1024 * 1024)
-        logger.info(f"Tamaño final del archivo TXT temporal: {file_size_mb:.2f} MB ({file_size_bytes} bytes)")
+        # Paso 1: Generar archivos JSON subdivididos
+        logger.info("Paso 1: Generando archivos JSON subdivididos...")
+        
+        Model = Comentarios2025
+        count = db.session.query(Model).count()
+        logger.info(f"Total de registros en Comentarios2025: {count}")
+        
+        file_part_number = 1
+        current_file_path = None
+        current_file_size_bytes = 0
+        current_batch_of_records = []
+        is_first_record_in_file = True
+        
+        offset = 0
+        while True:
+            batch_of_records = db.session.query(Model).limit(DB_QUERY_BATCH_SIZE).offset(offset).all()
+            if not batch_of_records:
+                # Escribir el lote final si existe
+                if current_batch_of_records:
+                    if not current_file_path: # Si no se ha abierto un archivo, abrir uno
+                        current_file_path = os.path.join(temp_dir, f"comentarios_2025_parte_{file_part_number}.json")
+                        with open(current_file_path, 'w', encoding='utf-8') as f:
+                            f.write('{\n')
+                            f.write(f'  "comentarios_2025_parte_{file_part_number}": [\n')
+                            is_first_record_in_file = True
+                            
+                    with open(current_file_path, 'a', encoding='utf-8') as f:
+                        for item in current_batch_of_records:
+                            if not is_first_record_in_file:
+                                f.write(',\n')
+                            else:
+                                is_first_record_in_file = False
+                            json.dump(item.serialize(), f, indent=4, ensure_ascii=False)
+                    
+                    with open(current_file_path, 'a', encoding='utf-8') as f:
+                        f.write('\n]\n')
+                        f.write('}\n')
+                    logger.info(f"Archivo final generado: {current_file_path}. Tamaño: {os.path.getsize(current_file_path) / (1024*1024):.2f} MB")
+                break
+            
+            for item in batch_of_records:
+                current_batch_of_records.append(item)
+                
+                # Simulación de tamaño del JSON para este registro
+                # Esto es una estimación. Un cálculo más preciso sería serializar y medir.
+                # Para un control estricto, hay que serializar y medir cada registro
+                # pero eso puede ser lento. Este enfoque es más rápido.
+                item_size_bytes_estimate = len(json.dumps(item.serialize(), ensure_ascii=False).encode('utf-8'))
+                
+                # Si el tamaño estimado del archivo actual + el nuevo registro supera el límite,
+                # cerrar el archivo actual y comenzar uno nuevo.
+                if current_file_path and (current_file_size_bytes + item_size_bytes_estimate) > (MAX_FILE_SIZE_MB * 1024 * 1024):
+                    logger.info(f"Tamaño de archivo '{current_file_path}' ({current_file_size_bytes / (1024*1024):.2f} MB) alcanzado. Cerrando y comenzando nuevo.")
+                    
+                    with open(current_file_path, 'a', encoding='utf-8') as f:
+                        f.write('\n]\n')
+                        f.write('}\n')
+                    
+                    file_part_number += 1
+                    current_file_path = None # Reset para abrir nuevo archivo
+                    current_file_size_bytes = 0
+                    current_batch_of_records = []
+                    is_first_record_in_file = True
 
-        if file_size_bytes == 0:
-            error_message = "El archivo TXT generado está vacío (0 bytes). No se puede subir a OpenAI para File Search."
-            logger.error(error_message)
-            return jsonify({"success": False, "message": error_message, "final_file_size_mb": 0}), 400
+                # Si no hay un archivo abierto, crear uno nuevo
+                if not current_file_path:
+                    current_file_path = os.path.join(temp_dir, f"comentarios_2025_parte_{file_part_number}.json")
+                    with open(current_file_path, 'w', encoding='utf-8') as f:
+                        f.write('{\n')
+                        f.write(f'  "comentarios_2025_parte_{file_part_number}": [\n')
+                    is_first_record_in_file = True
 
-        # --- 2. Subir el nuevo archivo TXT a OpenAI ---
-        logger.info("Subiendo el nuevo archivo TXT a OpenAI...")
-        with open(tmpfile_path, "rb") as file_to_upload:
-            uploaded_file = client.files.create(
-                file=file_to_upload,
-                purpose="assistants"
-            )
-        new_file_id = uploaded_file.id
-        logger.info(f"Nuevo archivo TXT subido con éxito. File ID: {new_file_id}")
+                # Escribir el registro al archivo
+                with open(current_file_path, 'a', encoding='utf-8') as f:
+                    if not is_first_record_in_file:
+                        f.write(',\n')
+                    else:
+                        is_first_record_in_file = False
+                    json.dump(item.serialize(), f, indent=4, ensure_ascii=False)
+                
+                current_file_size_bytes = os.path.getsize(current_file_path)
+            
+            offset += DB_QUERY_BATCH_SIZE
+            db.session.remove() # Limpiar la sesión para el siguiente lote
+        
+        # Finalizar el último archivo si no se ha hecho
+        if current_file_path and not current_file_path.endswith('.json}'): # Verificar si ya se cerró el JSON
+            with open(current_file_path, 'a', encoding='utf-8') as f:
+                f.write('\n]\n')
+                f.write('}\n')
 
-        # (El resto de la lógica para la DB y el proceso asíncrono se mantiene igual)
+        # Paso 2: Subir todos los archivos a OpenAI y esperar a que sean procesados
+        logger.info("Paso 2: Subiendo y esperando a que todos los archivos sean procesados por OpenAI...")
+        generated_files = [os.path.join(temp_dir, f) for f in os.listdir(temp_dir) if f.endswith('.json')]
+        if not generated_files:
+            raise Exception("No se generaron archivos para subir.")
+        
+        for file_path in generated_files:
+            with open(file_path, "rb") as file_to_upload:
+                uploaded_file = client.files.create(
+                    file=file_to_upload,
+                    purpose="assistants"
+                )
+            uploaded_file_ids.append(uploaded_file.id)
+            logger.info(f"Archivo subido: '{os.path.basename(file_path)}', File ID: {uploaded_file.id}")
+            _wait_for_file_processing(uploaded_file.id) # Esperar aquí de forma síncrona
 
+        # Paso 3: Crear el Vector Store con todos los archivos
+        logger.info("Paso 3: Todos los archivos procesados. Creando un único Vector Store...")
+        
+        vector_store = client.beta.vector_stores.create(
+            name="Comentarios 2025 Knowledge Base",
+            file_ids=uploaded_file_ids
+        )
+        vector_store_id = vector_store.id
+        logger.info(f"Vector Store creado. ID: {vector_store_id}. Esperando a que se complete la asimilación...")
+        _wait_for_vector_store_completion(vector_store_id) # Esperar a que el Vector Store esté listo
+        
+        # Paso 4: Actualizar la base de datos con el nuevo Vector Store ID
+        logger.info(f"Paso 4: Actualizando la base de datos con el Vector Store ID: {vector_store_id}")
         existing_file_record = FileDailyID.query.first()
-        old_file_id = None
+        old_file_id = existing_file_record.current_file_id if existing_file_record else None
         
         if existing_file_record:
-            old_file_id = existing_file_record.current_file_id
-            logger.info(f"Se encontró un registro existente en la DB. Old File ID: {old_file_id}")
-            existing_file_record.current_file_id = new_file_id
-            db.session.add(existing_file_record)
-            db.session.commit()
-            logger.info(f"ID de archivo actualizado en la base de datos a: {new_file_id}")
+            existing_file_record.current_file_id = ','.join(uploaded_file_ids) # Guardar todos los IDs
+            existing_file_record.current_vector_store_id = vector_store_id
         else:
-            logger.info("No se encontró un archivo anterior registrado en la base de datos. Creando nuevo registro.")
-            new_record = FileDailyID(current_file_id=new_file_id, current_vector_store_id=None)
+            new_record = FileDailyID(
+                current_file_id=','.join(uploaded_file_ids),
+                current_vector_store_id=vector_store_id
+            )
             db.session.add(new_record)
-            db.session.commit()
-            logger.info(f"Nuevo registro de ID de archivo creado en la base de datos: {new_file_id}")
+            
+        db.session.commit()
+        logger.info(f"DB actualizada con los IDs de archivos y el nuevo Vector Store ID: {vector_store_id}.")
         
-        executor.submit(_manage_vector_store_async, new_file_id, old_file_id)
-        logger.info(f"Proceso de gestión de Vector Store iniciado en segundo plano para el archivo {new_file_id}.")
-
         end_time = datetime.now()
         time_elapsed = end_time - start_time
         seconds = int(time_elapsed.total_seconds())
         time_format = str(timedelta(seconds=seconds))
+        
+        logger.info("======================================================")
+        logger.info("============ PROCESO FINALIZADO CON ÉXITO ============")
+        logger.info(f"Tiempo total: {time_format}")
+        logger.info("======================================================")
 
-        response_message = {
+        return jsonify({
             "success": True,
-            "message": "Archivo de prueba TXT recibido y proceso de vectorización iniciado en segundo plano.",
-            "new_file_id": new_file_id,
-            "final_file_size_mb": round(file_size_mb, 4),
-            "tiempo_de_generacion_archivo_local": time_format, 
-            "total_registros_procesados": count
-        }
-        logger.info(f"Respuesta enviada al cliente. Detalles: {json.dumps(response_message, indent=2, ensure_ascii=False)}")
-        return jsonify(response_message), 200
+            "message": f"Se crearon {len(uploaded_file_ids)} archivos y se generó un Vector Store único exitosamente.",
+            "vector_store_id": vector_store_id,
+            "archivos_creados": uploaded_file_ids,
+            "tiempo_total": time_format
+        }), 200
 
     except Exception as e:
         db.session.rollback() 
-        end_time = datetime.now() 
+        logger.error(f"Error fatal durante el proceso: {str(e)}", exc_info=True)
+        end_time = datetime.now()
         time_elapsed_on_error = end_time - start_time
         seconds_on_error = int(time_elapsed_on_error.total_seconds())
         time_format_on_error = str(timedelta(seconds=seconds_on_error))
-        logger.error(f"Error: {str(e)}", exc_info=True)
         return jsonify({"error": str(e), "status": 500, "tiempo_transcurrido_hasta_error": time_format_on_error}), 500
     finally:
-        if tmpfile_path and os.path.exists(tmpfile_path):
-            try:
-                os.remove(tmpfile_path)
-                logger.info(f"Archivo temporal '{tmpfile_path}' eliminado.")
-            except Exception as final_e:
-                logger.error(f"Error inesperado al eliminar el archivo temporal: {final_e}")
+        if os.path.exists(temp_dir):
+            for filename in os.listdir(temp_dir):
+                file_path = os.path.join(temp_dir, filename)
+                try:
+                    if os.path.isfile(file_path):
+                        os.remove(file_path)
+                except Exception as e:
+                    logger.error(f"Error al eliminar archivo temporal {file_path}: {e}")
+            os.rmdir(temp_dir)
+            logger.info(f"Directorio temporal '{temp_dir}' eliminado.")
 
 
 
