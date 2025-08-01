@@ -1327,6 +1327,141 @@ def actualizar_archivos_asistente():
                 logger.error(f"Error inesperado al eliminar el archivo temporal en el finally block: {final_e}")
 
 
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# >>>>> NUEVA RUTA SIMPLIFICADA PARA PRUEBAS DE FORMATO Y TAMAÑO >>>>>
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+@data_mentor_bp.route("/test-comentarios-2025-csv", methods=["POST"])
+def test_comentarios_2025_csv():
+    start_time = datetime.now()
+    tmpfile_path = None
+    
+    TABLE_TO_INCLUDE = (Comentarios2025, "comentarios_2025")
+    DB_QUERY_BATCH_SIZE = 10000 
+
+    logger.info("======================================================")
+    logger.info("===== INICIANDO PRUEBA CON UN SOLO ARCHIVO CSV =====")
+    logger.info("======================================================")
+    logger.info(f"Hora de inicio: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    try:
+        Model, section_name = TABLE_TO_INCLUDE
+        count = db.session.query(Model).count()
+        logger.info(f"Tabla a procesar: '{section_name}' con {count} registros.")
+
+        # --- 1. Crear el archivo CSV de forma incremental ---
+        with NamedTemporaryFile(mode="w+", delete=False, suffix=".csv", encoding="utf-8", newline='') as tmpfile:
+            tmpfile_path = tmpfile.name
+            
+            offset = 0
+            is_first_batch = True
+            
+            while True:
+                batch_of_records = db.session.query(Model).limit(DB_QUERY_BATCH_SIZE).offset(offset).all()
+                if not batch_of_records:
+                    break 
+
+                # Convertir el lote a un DataFrame
+                batch_df = pd.DataFrame([item.serialize() for item in batch_of_records])
+                
+                # Escribir el DataFrame al CSV
+                # header=True solo para el primer lote, para el resto es False
+                batch_df.to_csv(tmpfile, mode='a', index=False, header=is_first_batch, encoding='utf-8')
+                
+                if is_first_batch:
+                    is_first_batch = False
+                
+                offset += DB_QUERY_BATCH_SIZE
+                logger.info(f"  - '{section_name}': {offset} registros procesados hasta ahora. Memoria liberada.")
+                db.session.remove() # Limpiar la sesión después de cada lote
+
+            tmpfile.flush()
+            tmpfile.close() 
+        
+        file_size_bytes = os.path.getsize(tmpfile_path)
+        file_size_mb = file_size_bytes / (1024 * 1024)
+        logger.info(f"Tamaño final del archivo CSV temporal: {file_size_mb:.2f} MB ({file_size_bytes} bytes)")
+
+        if file_size_bytes == 0:
+            error_message = "El archivo CSV generado está vacío (0 bytes). No se puede subir a OpenAI para File Search."
+            logger.error(error_message)
+            return jsonify({"success": False, "message": error_message, "final_file_size_mb": 0}), 400
+
+        # --- 2. Subir el nuevo archivo CSV a OpenAI ---
+        logger.info("Subiendo el nuevo archivo CSV a OpenAI...")
+        with open(tmpfile_path, "rb") as file_to_upload:
+            uploaded_file = client.files.create(
+                file=file_to_upload,
+                purpose="assistants"
+            )
+        new_file_id = uploaded_file.id
+        logger.info(f"Nuevo archivo CSV subido con éxito. File ID: {new_file_id}")
+
+        # --- 3. Gestionar el ID del archivo y Vector Store en la DB local ---
+        # (Aquí usamos la misma lógica que en la ruta principal)
+        existing_file_record = FileDailyID.query.first()
+        old_file_id = None
+        
+        if existing_file_record:
+            old_file_id = existing_file_record.current_file_id
+            logger.info(f"Se encontró un registro existente en la DB. Old File ID: {old_file_id}")
+            existing_file_record.current_file_id = new_file_id
+            db.session.add(existing_file_record)
+            db.session.commit()
+            logger.info(f"ID de archivo actualizado en la base de datos a: {new_file_id}")
+        else:
+            logger.info("No se encontró un archivo anterior registrado en la base de datos. Creando nuevo registro.")
+            new_record = FileDailyID(current_file_id=new_file_id, current_vector_store_id=None)
+            db.session.add(new_record)
+            db.session.commit()
+            logger.info(f"Nuevo registro de ID de archivo creado en la base de datos: {new_file_id}")
+        
+        # --- 4. Ejecutar el proceso de vectorización en segundo plano ---
+        executor.submit(_manage_vector_store_async, new_file_id, old_file_id)
+        logger.info(f"Proceso de gestión de Vector Store iniciado en segundo plano para el archivo {new_file_id}.")
+
+        end_time = datetime.now()
+        time_elapsed = end_time - start_time
+        seconds = int(time_elapsed.total_seconds())
+        time_format = str(timedelta(seconds=seconds))
+
+        response_message = {
+            "success": True,
+            "message": "Archivo de prueba CSV recibido y proceso de vectorización iniciado en segundo plano.",
+            "new_file_id": new_file_id,
+            "final_file_size_mb": round(file_size_mb, 4),
+            "tiempo_de_generacion_archivo_local": time_format, 
+            "total_registros_procesados": count
+        }
+        logger.info(f"Respuesta enviada al cliente. Detalles: {json.dumps(response_message, indent=2, ensure_ascii=False)}")
+        return jsonify(response_message), 200
+
+    except Exception as e:
+        db.session.rollback() 
+        end_time = datetime.now() 
+        time_elapsed_on_error = end_time - start_time
+        seconds_on_error = int(time_elapsed_on_error.total_seconds())
+        time_format_on_error = str(timedelta(seconds=seconds_on_error))
+        logger.error(f"Error: {str(e)}", exc_info=True)
+        return jsonify({"error": str(e), "status": 500, "tiempo_transcurrido_hasta_error": time_format_on_error}), 500
+    finally:
+        if tmpfile_path and os.path.exists(tmpfile_path):
+            try:
+                os.remove(tmpfile_path)
+                logger.info(f"Archivo temporal '{tmpfile_path}' eliminado.")
+            except Exception as final_e:
+                logger.error(f"Error inesperado al eliminar el archivo temporal: {final_e}")
+
+
+
+
+
+
+
+
+
+
+
 # ESTOS SON TEST DE PORQUE NO ENCUENTRA EL ARCHIVO QUE SE SUPONE QUE YA ESTA ONLINE >>>>>>>>>>>>>>>>>>>> ( DESPUES SE PUEDE BORRAR )
 
 @data_mentor_bp.route("/test-openai-file-status", methods=["GET"])
@@ -1388,8 +1523,6 @@ def test_openai_file_status():
         logger.error(f"Error al consultar el estado del archivo {current_file_id} en OpenAI: {openai_e}", exc_info=True)
         return jsonify({"error": f"Error al consultar OpenAI: {str(openai_e)}", "status": 500}), 500
     
-
-
 @data_mentor_bp.route("/debug-assistant-thread", methods=["GET"])
 def debug_assistant_thread():
     """
