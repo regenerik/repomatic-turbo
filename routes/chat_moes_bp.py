@@ -56,6 +56,7 @@ def test():
 
 @chat_moes_bp.route("/chat", methods=["POST"])
 def chat():
+    logger.info("entró en chat moes")
     """
     Recibe prompt y opcionalmente thread_id.
     """

@@ -26,6 +26,7 @@ def query_assistant(prompt: str, thread_id: Optional[str] = None) -> Tuple[str, 
     
     Espera a que el run se complete y devuelve (respuesta_del_asistente, thread_id).
     """
+    logger.info("entró en utils de chat moes")
 
     # Texto de introducción fijo
     # instruction_prefix = (
