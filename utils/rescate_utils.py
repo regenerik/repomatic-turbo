@@ -210,7 +210,7 @@ def procesar_usuarios_por_asignacion(csv_bytes_io):
         )
         db.session.add(insc)
     db.session.commit()
-    logger.info("✓ Filas de 'Inscripciones Marketplace' guardadas en InscripcionMarketplace.")
+    logger.info("✓ Filas de 'Usuarios_por_Asignacion' guardadas en Usuarios_Por_Asignacion.")
 
 def procesar_usuarios_sin_id(csv_bytes_io):
     csv_bytes_io.seek(0)

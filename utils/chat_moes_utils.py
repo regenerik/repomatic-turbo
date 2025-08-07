@@ -16,7 +16,7 @@ HEADERS = {
     "OpenAI-Beta": "assistants=v2"
 }
 
-ASSISTANT_ID = "asst_X6VHrtqSgEpbQWRpdLcHUU8J"
+ASSISTANT_ID = "asst_EJnPM2iiGTaIp8sSTXcC914P"
 
 def query_assistant(prompt: str, thread_id: Optional[str] = None) -> Tuple[str, str]:
     """

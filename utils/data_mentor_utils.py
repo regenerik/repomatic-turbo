@@ -20,7 +20,7 @@ HEADERS = {
     "OpenAI-Beta": "assistants=v2"
 }
 
-ASSISTANT_ID = os.environ.get("OPENAI_ASSISTANT_ID", "asst_Gy0OKzAqKGqXiU25q9Z89Ifs")
+ASSISTANT_ID = os.environ.get("OPENAI_ASSISTANT_ID", "asst_2Y2zysHMQVAObfFs4N6An4Ub")
 
 # Inicializa el cliente de OpenAI
 client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
