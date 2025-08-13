@@ -169,3 +169,35 @@ def get_user_history():
     except Exception as e:
         print(f"Error al obtener el historial del usuario: {e}")
         return jsonify({"error": "Error interno del servidor"}), 500
+       
+@data_mentor_cursos_bp.route("/delete-individual-chat", methods=['POST'])
+def delete_individual_chat():
+    # Extrae la autorización y la valida
+    auth_header = request.headers.get('Authorization')
+    if auth_header != "1803-1989-1803-1989":
+        return jsonify({"resultado": "no borrado", "error": "Unauthorized"}), 401
+
+    # Obtiene el ID del chat del cuerpo de la solicitud JSON
+    data = request.get_json()
+    chat_id = data.get('id')
+
+    if not chat_id:
+        return jsonify({"resultado": "no borrado", "error": "ID del chat no proporcionado"}), 400
+    
+    try:
+        # Busca el chat por ID
+        chat_to_delete = HistoryUserCourses.query.get(chat_id)
+        
+        if not chat_to_delete:
+            return jsonify({"resultado": "no borrado", "error": "Chat no encontrado"}), 404
+            
+        # Elimina el chat de la sesión y guarda los cambios
+        db.session.delete(chat_to_delete)
+        db.session.commit()
+
+        return jsonify({"resultado": "borrado"}), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error al intentar borrar el chat: {e}")
+        return jsonify({"resultado": "no borrado", "error": "Error interno del servidor"}), 500
