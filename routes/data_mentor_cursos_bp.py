@@ -39,7 +39,7 @@ def check_api_key(api_key):
 def authorize():
     if request.method == 'OPTIONS':
         return
-    if request.path in ['/test_clasifica_data_mentor_cursos_bp']:
+    if request.path in ['/delete-individual-chat','/test_clasifica_data_mentor_cursos_bp']:
         return
     api_key = request.headers.get('Authorization')
     if not api_key or not check_api_key(api_key):
