@@ -913,8 +913,6 @@ class FileDailyID(db.Model):
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
 
-
-
 class InstruccionesGenerales(db.Model):
     __tablename__ = 'instrucciones_generales'
     id = db.Column(db.Integer, primary_key=True)
@@ -950,3 +948,28 @@ class InstruccionesIndividuales(db.Model):
     def set_relaciones_clave_dict(self, data_dict):
         """Convierte un diccionario a texto para guardar en relaciones_clave."""
         self.relaciones_clave = json.dumps(data_dict, ensure_ascii=False)
+
+
+class HistoryUserCourses(db.Model):
+    __tablename__ = 'history_user_courses'
+
+    id = db.Column(db.Integer, primary_key=True)
+    titulo = db.Column(db.String(255), nullable=False)
+    email = db.Column(db.String(255), db.ForeignKey('user.email'), nullable=False) # Clave foránea al email del usuario
+    texto = db.Column(db.Text, nullable=False) # Usamos Text para texto largo
+    
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<HistoryUserCourses id={self.id}, titulo={self.titulo}, email={self.email}>"
+
+    def serialize(self):
+        return {
+            'id': self.id,
+            'titulo': self.titulo,
+            'email': self.email,
+            'texto': self.texto,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }

@@ -12,6 +12,7 @@ from utils.data_mentor_cursos_utils import query_assistant
 import urllib.request
 import urllib.error
 import json
+from models import HistoryUserCourses, User
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
@@ -95,3 +96,76 @@ def close_chat():
         return jsonify({"error": f"HTTPError {e.code}: {error_message}"}), e.code
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@data_mentor_cursos_bp.route("/history-user-add", methods=['POST'])
+def add_user_history():
+    # Se extrae la autorización y se valida
+    auth_header = request.headers.get('Authorization')
+    if auth_header != "1803-1989-1803-1989":
+        return jsonify({"resultado": "no guardado", "error": "Unauthorized"}), 401
+
+    # Se obtienen los datos del cuerpo de la solicitud JSON
+    data = request.get_json()
+    if not data:
+        return jsonify({"resultado": "no guardado", "error": "No JSON data received"}), 400
+
+    titulo = data.get('titulo')
+    email = data.get('email')
+    texto = data.get('texto')
+
+    # Validación de datos básicos
+    if not all([titulo, email, texto]):
+        return jsonify({"resultado": "no guardado", "error": "Missing data: titulo, email, or texto"}), 400
+
+    # 1. Verifica si el usuario existe en la base de datos
+    user_exists = User.query.filter_by(email=email).first()
+    if not user_exists:
+        return jsonify({"resultado": "no guardado", "error": "User with this email does not exist"}), 404
+        
+    try:
+        # 2. Crea una nueva instancia de HistoryUserCourses
+        new_history = HistoryUserCourses(
+            titulo=titulo,
+            email=email,
+            texto=texto
+        )
+        
+        # 3. Agrega y guarda en la base de datos
+        db.session.add(new_history)
+        db.session.commit()
+
+        return jsonify({"resultado": "guardado"}), 201
+    
+    except Exception as e:
+        # En caso de cualquier error, se revierte la transacción de la base de datos
+        db.session.rollback()
+        print(f"Error al guardar el historial: {e}")
+        return jsonify({"resultado": "no guardado", "error": str(e)}), 500
+    
+@data_mentor_cursos_bp.route("/get-history-by-user", methods=['POST'])
+def get_user_history():
+    # Extraer el email del usuario de la solicitud JSON
+    data = request.get_json()
+    if not data or 'email' not in data:
+        return jsonify({"error": "Email no proporcionado en el cuerpo de la solicitud"}), 400
+
+    user_email = data.get('email')
+
+    # Verificar si el usuario existe antes de buscar su historial
+    user_exists = User.query.filter_by(email=user_email).first()
+    if not user_exists:
+        return jsonify({"error": "Usuario con este email no existe"}), 404
+
+    try:
+        # Buscar todas las entradas de historial para el email del usuario
+        history_records = HistoryUserCourses.query.filter_by(email=user_email).order_by(HistoryUserCourses.created_at.desc()).all()
+        
+        # Serializar cada registro
+        serialized_history = [record.serialize() for record in history_records]
+
+        return jsonify(serialized_history), 200
+    
+    except Exception as e:
+        print(f"Error al obtener el historial del usuario: {e}")
+        return jsonify({"error": "Error interno del servidor"}), 500
