@@ -31,7 +31,7 @@ def check_api_key(api_key):
 def authorize():
     if request.method == 'OPTIONS':
         return
-    if request.path in ['/delete_user','/check_token','/procesar_encuesta','/test_admin_bp','/','/correccion_campos_vacios','/descargar_positividad_corregida','/download_comments_evaluation','/all_comments_evaluation','/download_resume_csv','/create_resumes_of_all','/descargar_excel','/create_resumes', '/reportes_disponibles', '/create_user', '/login', '/users','/update_profile','/update_profile_image','/update_admin']:
+    if request.path in ['/toggle_user_status','/delete_user','/check_token','/procesar_encuesta','/test_admin_bp','/','/correccion_campos_vacios','/descargar_positividad_corregida','/download_comments_evaluation','/all_comments_evaluation','/download_resume_csv','/create_resumes_of_all','/descargar_excel','/create_resumes', '/reportes_disponibles', '/create_user', '/login', '/users','/update_profile','/update_profile_image','/update_admin']:
         return
     api_key = request.headers.get('Authorization')
     if not api_key or not check_api_key(api_key):
@@ -98,33 +98,42 @@ def create_user():
 @admin_bp.route('/login', methods=['POST'])
 def get_token():
     try:
-        #  Primero chequeamos que por el body venga la info necesaria:
+        # Primero chequeamos que por el body venga la info necesaria:
         email = request.json.get('email')
         password = request.json.get('password')
 
         if not email or not password:
             return jsonify({'error': 'Email y password son requeridos.'}), 400
         
-        # Buscamos al usuario con ese correo electronico ( si lo encuentra lo guarda ):
-        login_user = User.query.filter_by(email=request.json['email']).one()
+        # Buscamos al usuario con ese correo electronico
+        login_user = User.query.filter_by(email=email).one_or_none()
 
-        # Verificamos que el password sea correcto:
-        password_from_db = login_user.password #  Si loguin_user está vacio, da error y se va al "Except".
-        true_o_false = bcrypt.check_password_hash(password_from_db, password)
+        # Si el usuario no existe, o la contraseña es incorrecta, manejamos el error.
+        # Es mejor no especificar si es el email o la contraseña lo que falla por seguridad.
+        if not login_user or not bcrypt.check_password_hash(login_user.password, password):
+            return jsonify({"Error": "Usuario o contraseña incorrecta"}), 401
         
-        # Si es verdadero generamos un token y lo devuelve en una respuesta JSON:
-        if true_o_false:
-            expires = timedelta(minutes=30)  # pueden ser "hours", "minutes", "days","seconds"
+        # --- CAMBIO CLAVE: VERIFICAR EL ESTADO DEL USUARIO ---
+        if not login_user.status:
+            return jsonify({"Error": "Tu cuenta está inactiva. Por favor, contacta a un administrador."}), 403 # 403 Forbidden
+        
+        # Si la contraseña es correcta y el usuario está activo, generamos un token
+        expires = timedelta(minutes=30)
+        user_dni = login_user.dni
+        access_token = create_access_token(identity=str(user_dni), expires_delta=expires)
+        
+        return jsonify({ 
+            'access_token': access_token, 
+            'name': login_user.name, 
+            'admin': login_user.admin, 
+            'dni': user_dni, 
+            'email': login_user.email, 
+            'url_image': login_user.url_image
+        }), 200
 
-            user_dni = login_user.dni       # recuperamos el id del usuario para crear el token...
-            access_token = create_access_token(identity=str(user_dni), expires_delta=expires)   # creamos el token con tiempo vencimiento
-            return jsonify({ 'access_token':access_token, 'name':login_user.name, 'admin':login_user.admin, 'dni':user_dni, 'email':login_user.email, 'url_image':login_user.url_image}), 200  # Enviamos el token al front ( si es necesario serializamos el "login_user" y tambien lo enviamos en el objeto json )
-
-        else:
-            return {"Error":"Contraseña  incorrecta"}
-    
     except Exception as e:
-        return {"Error":"El email proporcionado no corresponde a ninguno registrado: " + str(e)}, 500
+        # Aquí manejamos errores inesperados, como problemas de conexión a la base de datos
+        return {"Error":"Ocurrió un problema en el servidor: " + str(e)}, 500
     
 
     # EJEMPLO DE RUTA RESTRINGIDA POR TOKEN. ( LA MISMA RECUPERA TODOS LOS USERS Y LO ENVIA PARA QUIEN ESTÉ LOGUEADO )
