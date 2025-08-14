@@ -129,9 +129,9 @@ def get_token():
 
     # EJEMPLO DE RUTA RESTRINGIDA POR TOKEN. ( LA MISMA RECUPERA TODOS LOS USERS Y LO ENVIA PARA QUIEN ESTÉ LOGUEADO )
 @admin_bp.route('/users')
-@jwt_required()  # Decorador para requerir autenticación con JWT
+@jwt_required()
 def show_users():
-    current_user_dni = get_jwt_identity()  # Obtiene la id del usuario del token
+    current_user_dni = get_jwt_identity()
     if current_user_dni:
         users = User.query.all()
         user_list = []
@@ -141,7 +141,8 @@ def show_users():
                 'email': user.email,
                 'name': user.name,
                 'admin': user.admin,
-                'url_image': user.url_image
+                'url_image': user.url_image,
+                'status': bool(user.status)  # <- CAMBIO CLAVE: convertimos a booleano
             }
             user_list.append(user_dict)
         return jsonify({"lista_usuarios":user_list , 'cantidad':len(user_list)}), 200
