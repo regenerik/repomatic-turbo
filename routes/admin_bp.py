@@ -117,7 +117,7 @@ def get_token():
             expires = timedelta(minutes=30)  # pueden ser "hours", "minutes", "days","seconds"
 
             user_dni = login_user.dni       # recuperamos el id del usuario para crear el token...
-            access_token = create_access_token(identity=user_dni, expires_delta=expires)   # creamos el token con tiempo vencimiento
+            access_token = create_access_token(identity=str(user_dni), expires_delta=expires)   # creamos el token con tiempo vencimiento
             return jsonify({ 'access_token':access_token, 'name':login_user.name, 'admin':login_user.admin, 'dni':user_dni, 'email':login_user.email, 'url_image':login_user.url_image}), 200  # Enviamos el token al front ( si es necesario serializamos el "login_user" y tambien lo enviamos en el objeto json )
 
         else:
