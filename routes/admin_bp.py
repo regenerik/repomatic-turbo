@@ -148,19 +148,18 @@ def show_users():
     else:
         return {"Error": "Token inválido o vencido"}, 401
 
-    # ACTUALIZAR PERFIL
+# ACTUALIZAR PERFIL
 @admin_bp.route('/update_profile', methods=['PUT'])
 def update():
     email = request.json.get('email')
     password = request.json.get('password')
     name = request.json.get('name')
     dni = request.json.get('dni')
-    url_image = "base"
+    url_image = request.json.get('url_image')
 
-
-    # Verificar que todos los campos requeridos estén presentes
-    if not email or not password or not name or not dni or not url_image:
-        return jsonify({"error": "Todos los campos son obligatorios"}), 400
+    # Verificar que el email y la contraseña estén presentes para la validación
+    if not email or not password:
+        return jsonify({"error": "El email y la contraseña son obligatorios"}), 400
 
     # Buscar al usuario por email
     user = User.query.filter_by(email=email).first()
@@ -168,19 +167,28 @@ def update():
     if not user:
         return jsonify({"error": "Usuario no encontrado"}), 404
 
-    # Actualizar los datos del usuario
-    user.name = name
-    user.dni = dni
-    user.password = bcrypt.generate_password_hash(password)  # Asegúrate de hash la contraseña antes de guardarla
-    user.url_image = url_image
+    # Validar la contraseña
+    if not bcrypt.check_password_hash(user.password, password):
+        return jsonify({"error": "Contraseña incorrecta"}), 401 # 401 Unauthorized
 
+    # Si la contraseña es correcta, actualizar los datos
     try:
+        if name is not None:
+            user.name = name
+        if dni is not None:
+            user.dni = dni
+        if url_image is not None:
+            user.url_image = url_image
+        
+        # Opcional: Si tienes una forma de cambiar la contraseña, podrías añadirla aquí.
+        # Por ahora, solo actualizamos los campos que se pasan
+        
         db.session.commit()
         return jsonify({"message": "Usuario actualizado con éxito"}), 200
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": f"Error al actualizar el usuario: {str(e)}"}), 500
-    
+        
 
     # ACTUALIZAR IMAGEN DE PERFIL
 @admin_bp.route('/update_profile_image', methods=['PUT'])
