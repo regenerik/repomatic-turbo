@@ -14,6 +14,7 @@ class User(db.Model):
     password = db.Column(db.String(255))
     url_image = db.Column(db.String(255))
     admin = db.Column(db.Boolean)
+    status = db.Column(db.Boolean, default=True) # Agrega esta línea
 
 class Permitido(db.Model):
     id = db.Column(db.Integer, primary_key=True)

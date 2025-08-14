@@ -31,7 +31,7 @@ def check_api_key(api_key):
 def authorize():
     if request.method == 'OPTIONS':
         return
-    if request.path in ['/check_token','/procesar_encuesta','/test_admin_bp','/','/correccion_campos_vacios','/descargar_positividad_corregida','/download_comments_evaluation','/all_comments_evaluation','/download_resume_csv','/create_resumes_of_all','/descargar_excel','/create_resumes', '/reportes_disponibles', '/create_user', '/login', '/users','/update_profile','/update_profile_image','/update_admin']:
+    if request.path in ['/delete_user','/check_token','/procesar_encuesta','/test_admin_bp','/','/correccion_campos_vacios','/descargar_positividad_corregida','/download_comments_evaluation','/all_comments_evaluation','/download_resume_csv','/create_resumes_of_all','/descargar_excel','/create_resumes', '/reportes_disponibles', '/create_user', '/login', '/users','/update_profile','/update_profile_image','/update_admin']:
         return
     api_key = request.headers.get('Authorization')
     if not api_key or not check_api_key(api_key):
@@ -259,6 +259,65 @@ def get_user(dni):
         return {"Error":"El dni proporcionado no corresponde a ninguno registrado: " + str(e)}, 500
     
 
+@admin_bp.route('/delete_user', methods=['DELETE'])
+@jwt_required()
+def delete_user():
+    # Obtiene la identidad (DNI del administrador) del token JWT
+    current_user_dni = get_jwt_identity()
+    
+    # 1. Verificar si el usuario que realiza la solicitud es un administrador
+    admin_user = User.query.filter_by(dni=current_user_dni).first()
+    if not admin_user or not admin_user.admin:
+        return jsonify({"error": "Acceso no autorizado"}), 403
+
+    # 2. Obtener el DNI del usuario a eliminar de la solicitud
+    dni_to_delete = request.json.get('dni')
+    if not dni_to_delete:
+        return jsonify({"error": "El DNI del usuario a eliminar es obligatorio"}), 400
+
+    # 3. Buscar y eliminar al usuario
+    user_to_delete = User.query.filter_by(dni=dni_to_delete).first()
+    if not user_to_delete:
+        return jsonify({"error": "Usuario no encontrado"}), 404
+
+    try:
+        db.session.delete(user_to_delete)
+        db.session.commit()
+        return jsonify({"message": f"Usuario con DNI {dni_to_delete} eliminado con éxito"}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": f"Error al eliminar el usuario: {str(e)}"}), 500
+    
+
+@admin_bp.route('/toggle_user_status', methods=['PUT'])
+@jwt_required()
+def toggle_user_status():
+    # Obtiene la identidad (DNI del administrador) del token JWT
+    current_user_dni = get_jwt_identity()
+    
+    # 1. Verificar si el usuario que realiza la solicitud es un administrador
+    admin_user = User.query.filter_by(dni=current_user_dni).first()
+    if not admin_user or not admin_user.admin:
+        return jsonify({"error": "Acceso no autorizado"}), 403
+
+    # 2. Obtener el DNI del usuario del que se va a cambiar el estado
+    dni_to_toggle = request.json.get('dni')
+    if not dni_to_toggle:
+        return jsonify({"error": "El DNI del usuario es obligatorio"}), 400
+
+    # 3. Buscar y cambiar el estado del usuario
+    user_to_toggle = User.query.filter_by(dni=dni_to_toggle).first()
+    if not user_to_toggle:
+        return jsonify({"error": "Usuario no encontrado"}), 404
+
+    try:
+        user_to_toggle.status = not user_to_toggle.status
+        db.session.commit()
+        new_status = "activo" if user_to_toggle.status else "inactivo"
+        return jsonify({"message": f"Estado del usuario con DNI {dni_to_toggle} cambiado a {new_status}"}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": f"Error al cambiar el estado del usuario: {str(e)}"}), 500
 
 # ADMINISTRACION DE RESUMEN BBDDconcat ( CRUDO ) DE COMENTARIOS DE APIES-----------------------------------/////////////////////////////////////////////////////////
 
