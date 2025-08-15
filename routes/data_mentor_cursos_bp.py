@@ -208,11 +208,14 @@ def delete_individual_chat():
 
 
 # Envio de emails : 
+
 def _chunk(lst, n):
+    """Parte una lista en bloques de n elementos."""
     for i in range(0, len(lst), n):
         yield lst[i:i + n]
 
 def _safe_resp_payload(resp):
+    """Intenta parsear JSON; si no, devuelve un recorte de texto."""
     try:
         return resp.json()
     except Exception:
@@ -222,8 +225,17 @@ def _safe_resp_payload(resp):
             txt = None
         return {"non_json_body": (txt[:1000] if txt else None)}
 
+# --- ruta ------------------------------------------------------------------
+
 @data_mentor_cursos_bp.route("/send-course-pdf", methods=["POST"])
 def send_course_pdf():
+    """
+    Recibe:
+      - FormData 'file': el PDF a enviar
+      - FormData 'emails': lista JSON de emails  (o CSV/separado por ; )
+      - opcional: 'subject', 'text', 'html'
+    Envía el PDF a todos los destinatarios usando Mailjet.
+    """
     try:
         # --- credenciales ---
         api_key = os.getenv("MJ_APIKEY_PUBLIC")
@@ -244,10 +256,9 @@ def send_course_pdf():
         if not file_bytes:
             return jsonify({"ok": False, "error": "Archivo vacío"}), 400
 
-        # límite práctico por email (Mailjet / proveedores ~15MB de mensaje BASE64)
-        # tamaño base64 = 4 * ceil(n/3)
-        base64_len = 4 * math.ceil(len(file_bytes) / 3)
-        # dejemos margen por headers / cuerpo -> tope 14.5MB
+        # tamaño base64 = 4 * ceil(n/3)  =>  4 * ((n + 2) // 3)  (sin math)
+        base64_len = 4 * ((len(file_bytes) + 2) // 3)
+        # margen por headers/cuerpo → tope ~14.5MB
         if base64_len > int(14.5 * 1024 * 1024):
             return jsonify({
                 "ok": False,
@@ -284,15 +295,16 @@ def send_course_pdf():
         text_part = request.form.get("text") or "Te comparto el curso adjunto."
         html_part = request.form.get("html") or "<p>Te comparto el curso adjunto.</p>"
 
+        # --- Mailjet ---
         mailjet = Client(auth=(api_key, api_secret), version="v3.1")
-
         results, errors = [], 0
-        for batch in _chunk(emails, 50):
+
+        for batch in _chunk(emails, 50):  # 50 por tanda es prudente
             data = {
                 "Messages": [{
                     "From": {"Email": sender_email, "Name": "Cursos Data Mentor"},
-                    "To": [{"Email": sender_email}],  # Mailjet exige al menos un To
-                    "Bcc": [{"Email": e} for e in batch],
+                    "To": [{"Email": sender_email}],              # Mailjet exige al menos un To
+                    "Bcc": [{"Email": e} for e in batch],         # destinatarios reales en Bcc
                     "Subject": subject,
                     "TextPart": text_part,
                     "HTMLPart": html_part,
@@ -309,6 +321,7 @@ def send_course_pdf():
             ok_batch = 200 <= resp.status_code < 300
             if not ok_batch:
                 errors += 1
+                # logueo liviano para debug
                 current_app.logger.warning(
                     "Mailjet non-2xx",
                     extra={"status": resp.status_code, "payload": payload}
