@@ -43,6 +43,8 @@ app.config["JWT_SECRET_KEY"] = "valor-variable"  # clave secreta para firmar los
 jwt = JWTManager(app)  # isntanciamos jwt de JWTManager utilizando app para tener las herramientas de encriptacion.
 bcrypt = Bcrypt(app)   # para encriptar password
 
+# por ejemplo en create_app()
+app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024  # 20 MB
 
 # REGISTRAR BLUEPRINTS ( POSIBILIDAD DE UTILIZAR EL ENTORNO DE LA app EN OTROS ARCHIVOS Y GENERAR RUTAS EN LOS MISMOS )
 
