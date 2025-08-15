@@ -210,13 +210,43 @@ def delete_individual_chat():
 # Envio de emails : 
 
 def _chunk(lst, n):
+    """Parte una lista en bloques de n elementos."""
     for i in range(0, len(lst), n):
-        yield lst[i:i+n]
+        yield lst[i:i + n]
 
-@data_mentor_cursos_bp.route("/send-course-pdf", methods=["POST"])  # <- tu path
-def send_course_pdf():
+def _safe_resp_payload(resp):
+    """Intenta parsear JSON; si no, devuelve un recorte de texto."""
     try:
-        # ---------- 1) archivo ----------
+        return resp.json()
+    except Exception:
+        try:
+            txt = resp.text
+        except Exception:
+            txt = None
+        return {"non_json_body": (txt[:1000] if txt else None)}
+
+# --- ruta ------------------------------------------------------------------
+
+@data_mentor_cursos_bp.route("/send-course-pdf", methods=["POST"])
+def send_course_pdf():
+    """
+    Recibe:
+      - FormData 'file': el PDF a enviar
+      - FormData 'emails': lista JSON de emails  (o CSV/separado por ; )
+      - opcional: 'subject', 'text', 'html'
+
+    Envía el PDF a todos los destinatarios usando Mailjet.
+    Devuelve JSON con detalle por “batch”.
+    """
+    try:
+        # ---------- 0) Validación credenciales Mailjet ----------
+        api_key = os.getenv("MJ_APIKEY_PUBLIC")
+        api_secret = os.getenv("MJ_APIKEY_PRIVATE")
+        sender_email = os.getenv("MJ_SENDER_EMAIL")
+        if not (api_key and api_secret and sender_email):
+            return jsonify({"ok": False, "error": "Faltan variables de entorno de Mailjet"}), 500
+
+        # ---------- 1) Archivo ----------
         if "file" not in request.files:
             return jsonify({"ok": False, "error": "Falta 'file' en FormData"}), 400
 
@@ -229,60 +259,61 @@ def send_course_pdf():
         if not file_bytes:
             return jsonify({"ok": False, "error": "Archivo vacío"}), 400
 
-        # (Mailjet tiene límite aprox 15 MB por email)
+        # Mailjet tolera aprox ~15MB por email (según plan); validamos por las dudas
         if len(file_bytes) > 15 * 1024 * 1024:
             return jsonify({"ok": False, "error": "Adjunto excede 15MB (límite Mailjet)"}), 413
 
         content_type = f.mimetype or "application/pdf"
         b64 = base64.b64encode(file_bytes).decode("utf-8")
 
-        # ---------- 2) emails ----------
+        # ---------- 2) Emails ----------
         emails = []
 
-        # a) emails[] estilo array
+        # a) array estilo emails[] (si lo usás)
         emails += [e.strip() for e in request.form.getlist("emails[]") if e.strip()]
 
-        # b) "emails" como JSON o CSV
+        # b) campo 'emails' como JSON / CSV / string
         raw_emails = (request.form.get("emails") or "").strip()
         if raw_emails:
+            parsed_ok = False
+            # intento JSON
             try:
                 parsed = json.loads(raw_emails)
                 if isinstance(parsed, list):
                     emails += [str(e).strip() for e in parsed if str(e).strip()]
-                else:
-                    emails.append(str(parsed).strip())
+                elif isinstance(parsed, str) and parsed.strip():
+                    emails.append(parsed.strip())
+                parsed_ok = True
             except Exception:
-                # CSV / separado por ; o ,
+                parsed_ok = False
+
+            if not parsed_ok:
+                # fallback CSV o separado por ; / ,
                 emails += [e.strip() for e in raw_emails.replace(";", ",").split(",") if e.strip()]
 
-        # quitar duplicados y vacíos
+        # normalizo / quito duplicados
         emails = sorted(set([e for e in emails if e]))
-
         if not emails:
             return jsonify({"ok": False, "error": "No se recibieron emails"}), 400
 
-        # opcionales
+        # ---------- 3) Texto del email ----------
         subject = request.form.get("subject") or f"Curso: {os.path.splitext(filename)[0]}"
         text_part = request.form.get("text") or "Te comparto el curso adjunto."
         html_part = request.form.get("html") or "<p>Te comparto el curso adjunto.</p>"
 
-        # ---------- 3) credenciales Mailjet ----------
-        api_key = os.getenv("MJ_APIKEY_PUBLIC")
-        api_secret = os.getenv("MJ_APIKEY_PRIVATE")
-        sender_email = os.getenv("MJ_SENDER_EMAIL")
-        if not (api_key and api_secret and sender_email):
-            return jsonify({"ok": False, "error": "Faltan variables de entorno de Mailjet"}), 500
-
+        # ---------- 4) Cliente Mailjet ----------
         mailjet = Client(auth=(api_key, api_secret), version="v3.1")
 
-        # ---------- 4) envío (Bcc para privacidad, en tandas de hasta 50) ----------
+        # ---------- 5) Envío por tandas (Bcc) ----------
         results = []
-        for batch in _chunk(emails, 50):
+        errors = 0
+
+        for batch in _chunk(emails, 50):  # 50 por tanda es prudente
             data = {
                 "Messages": [{
                     "From": {"Email": sender_email, "Name": "Cursos Data Mentor"},
-                    "To": [{"Email": sender_email}],  # Mailjet exige al menos un "To"
-                    "Bcc": [{"Email": e} for e in batch],  # los destinatarios reales van ocultos
+                    "To": [{"Email": sender_email}],            # Mailjet exige al menos un "To"
+                    "Bcc": [{"Email": e} for e in batch],       # destinatarios reales en Bcc
                     "Subject": subject,
                     "TextPart": text_part,
                     "HTMLPart": html_part,
@@ -293,19 +324,32 @@ def send_course_pdf():
                     }],
                 }]
             }
-            resp = mailjet.send.create(data=data)
-            results.append({"status": resp.status_code, "body": resp.json()})
 
-        sent_batches = sum(1 for r in results if 200 <= r["status"] < 300)
+            resp = mailjet.send.create(data=data)
+            payload = _safe_resp_payload(resp)
+
+            ok_batch = 200 <= resp.status_code < 300
+            if not ok_batch:
+                errors += 1
+
+            results.append({
+                "status": resp.status_code,
+                "ok": ok_batch,
+                "payload": payload,      # si Mailjet devolvió HTML/empty, queda en non_json_body
+                "batch_size": len(batch),
+                "recipients": batch,
+            })
+
+        status_code = 200 if errors == 0 else 502
         return jsonify({
-            "ok": True,
+            "ok": errors == 0,
             "filename": filename,
             "email_count": len(emails),
             "batches": len(results),
-            "sent_batches": sent_batches,
+            "sent_batches": sum(1 for r in results if r["ok"]),
             "results": results,
-        }), 200
+        }), status_code
 
     except Exception as e:
-        current_app.logger.exception("send_course_pfd failed")
+        current_app.logger.exception("send_course_pdf failed")
         return jsonify({"ok": False, "error": str(e)}), 500
