@@ -337,6 +337,7 @@ def download_formularios_excel():
 
 @form_gestores_bp.route('/get_forms', methods=['GET'])
 def get_forms():
+    logger.info('Entramos en get Forms..')
     forms = (FormularioGestor
              .query
              .order_by(FormularioGestor.creado_en.desc())
