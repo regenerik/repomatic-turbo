@@ -14,6 +14,7 @@ import re
 import pandas as pd
 from io import BytesIO
 import io
+from sqlalchemy import asc, desc
 
 
 
@@ -207,33 +208,94 @@ def descargar_reporte():
 
 @rescate_reportes_bp.route('/reportes_acumulados', methods=['GET'])
 def listar_reportes_agrupados():
-    # Traemos todos los reportes ordenados primero por report_url y luego por fecha descendente
-    reportes = Reporte.query.order_by(Reporte.report_url, Reporte.created_at.desc()).all()
+    """
+    Devuelve:
+    [
+      {
+        "report_url": str,
+        "version_count": int,
+        "versions": [
+          {
+            "id": int,
+            "user_id": int,
+            "report_url": str,
+            "title": str,
+            "size_megabytes": float|null,
+            "elapsed_time": str|null,
+            "created_at": "dd/mm/YYYY HH:MM:SS"|null
+          }, ...
+        ]
+      }, ...
+    ]
 
-    # Usamos un diccionario para agrupar por report_url
-    grupos = {}
-    for rep in reportes:
-        rep_data = {
-            "id": rep.id,
-            "user_id": rep.user_id,
-            "report_url": rep.report_url,
-            "title": rep.title,
-            "size_megabytes": rep.size,
-            "elapsed_time": rep.elapsed_time,
-            "created_at": rep.created_at.strftime("%d/%m/%Y %H:%M:%S") if rep.created_at else None
+    Query params:
+      - days=N (default 3). Usá days=0 para desactivar el filtro temporal.
+    """
+    # 1) ventana temporal (default 3 días)
+    days = request.args.get('days', default=3, type=int)
+    since = None
+    if isinstance(days, int) and days > 0:
+        since = datetime.utcnow() - timedelta(days=days)
+
+    # 2) Proyectamos SOLO las columnas necesarias (no traemos .data)
+    q = db.session.query(
+        Reporte.id.label('id'),
+        Reporte.user_id.label('user_id'),
+        Reporte.report_url.label('report_url'),
+        Reporte.title.label('title'),
+        Reporte.size.label('size_megabytes'),
+        Reporte.elapsed_time.label('elapsed_time'),
+        Reporte.created_at.label('created_at'),
+    )
+
+    if since is not None:
+        q = q.filter(Reporte.created_at >= since)
+
+    q = (
+        q.order_by(asc(Reporte.report_url), desc(Reporte.created_at))
+         .execution_options(stream_results=True)  # cursor server-side si el driver lo soporta
+         .yield_per(1000)                         # batches para no llenar RAM
+         .enable_eagerloads(False)                # evita cargas innecesarias
+    )
+
+    # 3) Agrupamos on-the-fly
+    grupos = {}  # dict[str, list[dict]]
+    for row in q:
+        (
+            _id,
+            _user_id,
+            _report_url,
+            _title,
+            _size_mb,
+            _elapsed,
+            _created,
+        ) = row  # Query sin .mappings() => tuplas
+
+        item = {
+            "id": _id,
+            "user_id": _user_id,
+            "report_url": _report_url,
+            "title": _title,
+            "size_megabytes": float(_size_mb) if _size_mb is not None else None,
+            "elapsed_time": _elapsed,
+            "created_at": _created.strftime("%d/%m/%Y %H:%M:%S") if _created else None,
         }
-        if rep.report_url not in grupos:
-            grupos[rep.report_url] = []
-        grupos[rep.report_url].append(rep_data)
 
-    # Armamos el array de respuesta, donde cada objeto representa un grupo único
-    resultado = []
-    for url, versiones in grupos.items():
-        resultado.append({
+        lst = grupos.get(_report_url)
+        if lst is None:
+            grupos[_report_url] = [item]
+        else:
+            lst.append(item)
+
+    # 4) Mismo shape que antes
+    resultado = [
+        {
             "report_url": url,
             "version_count": len(versiones),
-            "versions": versiones
-        })
+            "versions": versiones,
+        }
+        for url, versiones in grupos.items()
+    ]
 
     return jsonify(resultado)
 
