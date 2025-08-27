@@ -1,10 +1,10 @@
-from flask import Blueprint, send_file, make_response, request, jsonify, render_template, current_app, Response # Blueprint para modularizar y relacionar con app
-from flask_bcrypt import Bcrypt                                  # Bcrypt para encriptación
-from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity   # Jwt para tokens
-from database import db                                          # importa la db desde database.py
+from flask import Blueprint, send_file, make_response, request, jsonify, render_template, current_app, Response
+from flask_bcrypt import Bcrypt 
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity 
+from database import db 
 from logging_config import logger
-import os                                                        # Para datos .env
-from dotenv import load_dotenv                                   # Para datos .env
+import os
+from dotenv import load_dotenv 
 load_dotenv()
 from utils.data_mentor_utils import query_assistant_mentor
 import urllib.request
@@ -12,22 +12,23 @@ import urllib.error
 import json
 import pandas as pd
 from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas,FormularioGestor,CuartoSurveySql, QuintoSurveySql, Comentarios2023, Comentarios2024, Comentarios2025, BaseLoopEstaciones, FichasGoogleCompetencia, FichasGoogle, SalesForce, ComentariosCompetencia, FileDailyID
-import hashlib
 from sqlalchemy.exc import SQLAlchemyError
-import csv
+import csv, textwrap
 import time
-import tempfile
+import re
 from openai import OpenAI
-import httpx
 from tempfile import NamedTemporaryFile
 import openpyxl
 from io import BytesIO
 from datetime import datetime, timedelta 
-from concurrent.futures import ThreadPoolExecutor
-import shutil
+from sqlalchemy import create_engine, text
+from sqlalchemy import inspect
+from sqlalchemy.orm import sessionmaker
+from typing import Dict, Any, List
 
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 if not OPENAI_API_KEY:
     raise ValueError("Debes definir la variable de entorno OPENAI_API_KEY con tu clave de API.")
 
@@ -39,8 +40,7 @@ HEADERS = {
     "OpenAI-Beta": "assistants=v2"
 }
 
-
-data_mentor_bp = Blueprint('data_mentor_bp', __name__)     # instanciar admin_bp desde clase Blueprint para crear las rutas.
+data_mentor_bp = Blueprint('data_mentor_bp', __name__) 
 bcrypt = Bcrypt()
 jwt = JWTManager()
 
@@ -63,30 +63,263 @@ def authorize():
     
 # RUTA TEST:
 
-@data_mentor_bp.route('/test_data_mentor_bp', methods=['GET'])
-def test():
-    logger.info("Chat data mentor bp rutas funcionando ok segun test.")
-    return jsonify({'message': 'test bien sucedido','status':"Si lees esto, chat data mentor rutas funcionan bien..."}),200
+VECTOR_STORE_ID = os.getenv("VECTOR_STORE_ID") 
+DATABASE_URL = os.getenv("DATABASE_URL")
 
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+Session = sessionmaker(bind=engine)
+
+# ====== RELACIONES (NARRATIVA, SIN JSON) ======
+NARRATIVE_RELATIONS = textwrap.dedent("""
+Guía corta de datos y relaciones (narrativa, NO JSON)
+
+Idea general
+- La tabla principal es base_loop_estaciones. Tiene info operativa, geográfica y administrativa de cada estación.
+- Claves relevantes: "APIES" (identificador de estación, texto) y "Id" (otro identificador de estación).
+- Si un nombre de columna tiene espacios o signos (p. ej., Estacion de Servicio: Zona, Store Code), citá con comillas dobles: "Store Code".
+- Usá SQL ANSI. Strings con comillas simples. Identificadores con comillas dobles si tienen espacios.
+
+Relaciones típicas (joins)
+- base_loop_estaciones."APIES" = comentarios_encuesta_2023.apies
+- base_loop_estaciones."APIES" = comentarios_encuesta_2024.apies
+- base_loop_estaciones."APIES" = comentarios_encuesta_2025.apies
+
+- base_loop_estaciones."Id" = fichas_google."Store Code"
+- base_loop_estaciones."Id" = fichas_google_competencia.idLoop
+- base_loop_estaciones."Id" = comentarios_competencia.IDLOOP
+- base_loop_estaciones."Id" = usuarios_por_asignacion.id_pertenencia
+
+- **NUEVA:** La tabla detalle_apies contiene información de negocio. Su columna 'apies' se vincula a:
+  - `usuarios_por_asignacion.id_pertenencia`
+  - `base_loop_estaciones."Apies"`
+
+Aprendizaje / cursos (no todas tienen FK explícita, se relaciona por semántica):
+- dni aparece en varias: avance_cursada.dni, cursadas_agrupadas.dni, usuarios_* (dni).
+- id_curso en detalles_de_cursos.id_curso y cursadas_agrupadas.id_curso.
+- avance_cursada tiene nombre_corto_curso / nombre_programa (texto) y puede cruzar con detalles_de_cursos por nombre o id si existe un mapping conocido.
+
+Encuestas:
+- cuarto_survey_sql y quinto_survey_sql: resultados de encuestas (campos texto con preguntas). Vinculaciones por curso/gestor/fechas si hace falta.
+- comentarios_* (2023/2024/2025): comentarios de clientes por apies/fecha/sentiment.
+
+Competencia:
+- fichas_google_competencia e comentarios_competencia se enlazan a estaciones por idLoop ~ base_loop_estaciones."Id".
+- fichas_google: nuestras fichas (reseñas, rating) por "Store Code" ~ base_loop_estaciones."Id".
+
+Notas prácticas:
+- Preferí SELECT de columnas concretas (no *).
+- Si hay columnas con espacios, citá con "doble comilla".
+- Si pedís muchos registros, agregá LIMIT <= 200.
+""").strip()
+
+# ====== Helpers: narrar el esquema sin JSON ======
+def _table_summary(insp, table: str, max_cols: int | None = None) -> str:
+    cols = [c["name"] for c in insp.get_columns(table)]
+    if max_cols and len(cols) > max_cols:
+        head = ", ".join(cols[:max_cols])
+        return f"- {table}: columnas: {head}, … (+{len(cols)-max_cols} más)"
+    else:
+        return f"- {table}: columnas: {', '.join(cols) if cols else '(sin columnas detectadas)'}"
+
+def build_db_schema_narrative(whitelist: List[str] | None = None, max_cols: int | None = None) -> str:
+    """
+    Devuelve un texto plano (no JSON) con el listado de tablas y sus columnas.
+    Evita corchetes/llaves para no gatillar parsing raro.
+    """
+    insp = inspect(engine)
+    tables = insp.get_table_names()
+    if whitelist:
+        tables = [t for t in tables if t in whitelist]
+
+    lines = ["Esquema (resumen narrativo):"]
+    for t in sorted(tables):
+        try:
+            lines.append(_table_summary(insp, t, max_cols=max_cols))
+        except Exception:
+            lines.append(f"- {t}: (no se pudieron listar columnas)")
+    return "\n".join(lines)
+
+# ====== Router ======
+def make_router_system_prompt(narrative_schema: str) -> str:
+    return textwrap.dedent(f"""
+    Sos un router NL→(SQL|RAG|BOTH) para Data Mentor. Devolvés SOLO JSON válido (sin texto extra).
+
+    REGLAS DURAS:
+    - Elegí "SQL", "RAG" o "BOTH".
+    - Si devolvés SQL: debe ser SOLO SELECT; sin INSERT/UPDATE/DELETE/DDL; sin ';', '--', '/* */'.
+      Si falta LIMIT, agregalo (<= 200).
+      Usá únicamente tablas y columnas mencionadas en el esquema narrativo.
+      Si una columna tiene espacios o símbolos, citá con comillas dobles ("...").
+      Preferí lista de columnas sobre SELECT *.
+    - **NUEVA REGLA (FINAL):** Para buscar valores de texto en columnas, siempre usá `WHERE TRIM(LOWER(columna)) LIKE LOWER('%valor%')`. Para IDs o valores numéricos exactos, usá `=`.
+    - Si no hay datos suficientes en DB o falta contexto textual → RAG_QUERY.
+    - BOTH: incluye SELECT y RAG_QUERY.
+    - REASON: 1–2 líneas cortas.
+
+    CONTEXTO NARRATIVO (sin JSON):
+    {NARRATIVE_RELATIONS}
+
+    {narrative_schema}
+    """).strip()
+
+ROUTER_USER = """USER_TEXT:
+{user_text}
+
+Respondé SOLO con JSON:
+{{
+  "mode": "SQL" | "RAG" | "BOTH",
+  "sql": "<SELECT ... o vacío>",
+  "rag_query": "<texto o vacío>",
+  "reason": "<1–2 líneas>"
+}}"""
+
+def call_router(user_text: str, narrative_schema_text: str) -> Dict[str, Any]:
+    sys = make_router_system_prompt(narrative_schema_text)
+    usr = ROUTER_USER.format(user_text=user_text)
+    t0 = time.time()
+    
+    resp = client.chat.completions.create(
+        model=OPENAI_MODEL,
+        messages=[{"role":"system","content":sys}, {"role":"user","content":usr}],
+        response_format={"type": "json_object"}
+    )
+    
+    latency = time.time() - t0
+    text_out = resp.choices[0].message.content.strip()
+    out = json.loads(text_out)
+    out["_router_latency"] = latency
+    return out
+
+# ====== SQL guard rails ======
+FORBIDDEN = re.compile(r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE|MERGE|CREATE|GRANT|REVOKE)\b|;|--|/\*", re.I)
+
+def _extract_tables(sql: str) -> List[str]:
+    # match FROM/JOIN "Table Name" or from/join table_name (con/sin alias)
+    pattern = re.compile(r'\b(from|join)\s+(".*?"|[\w\.]+)', re.I)
+    tbls = []
+    for m in pattern.finditer(sql):
+        raw = m.group(2).strip()
+        if raw.startswith('"') and raw.endswith('"'):
+            raw = raw[1:-1]
+        # quitar schema si viene schema.table
+        raw = raw.split(".")[-1]
+        tbls.append(raw)
+    return list(dict.fromkeys(tbls)) 
+
+def validate_sql(sql: str, allowed_tables: List[str]) -> str:
+    s = sql.strip()
+    if not s.lower().startswith("select"):
+        raise ValueError("Solo SELECT permitido.")
+    if FORBIDDEN.search(s):
+        raise ValueError("Query contiene operaciones prohibidas o comentarios.")
+    # chequeo de tablas usadas
+    used = _extract_tables(s)
+    for t in used:
+        if t not in allowed_tables:
+            raise ValueError(f"Tabla no permitida: {t}")
+    # LIMIT <= 200
+    m = re.search(r"\blimit\s+(\d+)", s, re.I)
+    if m:
+        n = int(m.group(1))
+        if n > 200:
+            s = re.sub(r"\blimit\s+\d+", "LIMIT 200", s, flags=re.I)
+    else:
+        s += " LIMIT 200"
+    return s
+
+def run_sql(sql: str) -> List[Dict[str, Any]]:
+    session = Session()
+    rows = session.execute(text(sql)).mappings().all()
+    out = [dict(r) for r in rows]
+    session.close()
+    return out
+
+# ====== Síntesis final (con RAG opcional) ======
+def synthesize_final(user_text: str, results_sql: List[Dict[str,Any]] | None, rag_query: str | None) -> str:
+    system = (
+        "Sos Data Mentor. Respondés claro para managers.\n"
+        "- Si hay resultados SQL: mostrás tabla corta (máx 10 filas) + resumen.\n"
+        "- Si hay RAG: usá file_search (vector store adjunto) y citá fuente (archivo/sección).\n"
+        "- Si falta info, decilo sin vueltas."
+    )
+    msgs = [
+        {"role":"system","content":system},
+        {"role":"user","content":(
+            f"USER_TEXT: {user_text}\n\n"
+            f"RESULTADOS_SQL (JSON, top 10): {json.dumps(results_sql[:10] if results_sql else [], ensure_ascii=False)}\n\n"
+            f"RAG_QUERY: {rag_query or ''}\n"
+            "Instrucciones:\n"
+            "- Si RAG_QUERY no está vacío, ejecutá file_search para traer contexto y CITAR.\n"
+            "- Devolvé respuesta final concisa con bullets + tabla si aplica."
+        )}
+    ]
+    kwargs = {"model": OPENAI_MODEL, "messages": msgs}
+
+    if rag_query:
+        # El modelo de chat no necesita adjuntar herramientas como el Assistant.
+        # Solo le damos la query para que sepa qué información buscar.
+        # No se usa 'tool_resources' aquí.
+        pass
+
+    resp = client.chat.completions.create(**kwargs)
+    return resp.choices[0].message.content
+
+
+# ====== Ruta principal ======
 @data_mentor_bp.route("/chat_mentor", methods=["POST"])
 def chat_mentor():
     logger.info("1 - Entró en la ruta Chat_mentor.")
-    """
-    Recibe prompt y opcionalmente thread_id.
-    """
     data = request.get_json()
     if not data or "prompt" not in data:
         return jsonify({"error": "Falta el prompt en el cuerpo de la solicitud"}), 400
 
-    prompt = data["prompt"]
-    thread_id = data.get("thread_id")  # puede ser None
-    logger.info("2 - Encontró la data del prompt...")
+    user_text = data["prompt"]
+    thread_id = data.get("thread_id")
+
+    # 1) Armar guía narrativa del esquema (sin JSON).
+    narrative_schema = build_db_schema_narrative(whitelist=None, max_cols=None)
+
+    # 2) Router
+    router = call_router(user_text, narrative_schema)
+    mode = (router.get("mode") or "").upper()
+    sql = (router.get("sql") or "").strip()
+    rag_query = (router.get("rag_query") or "").strip()
+    logger.info(f"Router => {mode} | reason={router.get('reason','')}")
+
+    # 3) Ejecutar SQL (si aplica)
+    resultados_sql: List[Dict[str, Any]] = []
+    sql_ejecutado = ""
     try:
-        response_text, current_thread = query_assistant_mentor(prompt, thread_id)
-        return jsonify({"response": response_text, "thread_id": current_thread}), 200
+        if mode in ("SQL","BOTH") and sql:
+            # allowed tables = las del schema narrado
+            allowed_tables = inspect(engine).get_table_names()
+            sql_validado = validate_sql(sql, allowed_tables)
+            sql_ejecutado = sql_validado
+            resultados_sql = run_sql(sql_validado)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
-    
+        return jsonify({"error": f"Error SQL: {str(e)}", "router": router}), 400
+
+    # 4) Síntesis final (con RAG si aplica)
+    try:
+        final_text = synthesize_final(
+            user_text,
+            resultados_sql,
+            rag_query if mode in ("RAG","BOTH") else None
+        )
+    except Exception as e:
+        return jsonify({"error": f"Error en síntesis: {str(e)}", "router": router}), 500
+
+    # 5) Respuesta
+    return jsonify({
+        "response": final_text,
+        "thread_id": thread_id,
+        "trace": {
+            "mode": mode,
+            "sql": sql_ejecutado,
+            "rows": len(resultados_sql),
+            "router_ms": int(router.get("_router_latency",0)*1000)
+        }
+    }), 200
 
 @data_mentor_bp.route("/close_chat_mentor", methods=["POST"])
 def close_chat():
@@ -706,25 +939,148 @@ def cargar_base_loop():
         archivo.seek(0)
         delimiter = csv.Sniffer().sniff(sample).delimiter
 
+        # Leer el archivo CSV de forma optimizada
         df = pd.read_csv(archivo, sep=delimiter, encoding='utf-8', on_bad_lines='skip')
     except Exception as e:
         return jsonify({"error": f"Error al leer el archivo CSV: {e}"}), 400
 
     try:
-        columnas_db = {col.name: col.key for col in BaseLoopEstaciones.__table__.columns}
-
+        # CORRECCIÓN DEFINITIVA:
+        # 1. Crear un diccionario que mapee el nombre de la columna del CSV (el alias)
+        #    al nombre del atributo que usa el modelo de SQLAlchemy.
+        columnas_csv_a_modelo_attr = {
+            'Id': 'id',
+            'Apies': 'apies',
+            'Inscripcion': 'inscripcion',
+            'Operador': 'operador',
+            'Estado Boca': 'estado_boca',
+            'Bandera': 'bandera',
+            'Direccion Admin.': 'direccion_admin',
+            'Localidad Geo.': 'localidad_geo',
+            'Provincia Geo.': 'provincia_geo',
+            'Region Geo.': 'region_geo',
+            'Zona Com. Geo.': 'zona_com_geo',
+            'Tipo Establecimiento': 'tipo_establecimiento',
+            'Tipo Operador': 'tipo_operador',
+            'Tipo Despacho': 'tipo_despacho',
+            'Tipo Ubicacion': 'tipo_ubicacion',
+            'Region Admin.': 'region_admin',
+            'Zona Com. Admin.': 'zona_com_admin',
+            'RRCC': 'rrcc',
+            'Opera ACA': 'opera_aca',
+            'Bandera ACA': 'bandera_aca',
+            'Contrato GN': 'contrato_gn',
+            'Tipo Operacion': 'tipo_operacion',
+            'Inicio actividad cuenta': 'inicio_actividad_cuenta',
+            'Tipo Imagen': 'tipo_imagen',
+            'Tipo Tienda': 'tipo_tienda',
+            'Tipo Lubricentro': 'tipo_lubricentro',
+            'Serviclub': 'serviclub',
+            'YPF Ruta': 'ypf_ruta',
+            'Azul 32': 'azul_32',
+            'Punto Eléctrico': 'punto_eléctrico',
+            'Cant. Imagenes': 'cant_imagenes',
+            'Cant. Surtidores': 'cant_surtidores',
+            'Cant. Tanques': 'cant_tanques',
+            'Cant. Bombas': 'cant_bombas',
+            'Cant. Conectores': 'cant_conectores',
+            'Vol. prom. total N2 (m3)': 'vol_prom_total_n2_m3',
+            'Vol. prom. total N3 (m3)': 'vol_prom_total_n3_m3',
+            'Vol. prom. total Nafta (m3)': 'vol_prom_total_nafta_m3',
+            'Vol. prom. total GO (m3)': 'vol_prom_total_go_m3',
+            'Vol. prom. total GO2 (m3)': 'vol_prom_total_go2_m3',
+            'Vol. prom. total GO3 (m3)': 'vol_prom_total_go3_m3',
+            'Volumen Promedio Liquidos (m3)': 'volumen_promedio_liquidos_m3',
+            'Vol. prom. GNC (m3)': 'vol_prom_gnc_m3',
+            'Volumen Promedio Lubricantes (m3)': 'volumen_promedio_lubricantes_m3',
+            'Cantidad Cambios de Lubricantes': 'cantidad_cambios_de_lubricantes',
+            'Facturacion Bruta Promedio Tienda (ARS)': 'facturacion_bruta_promedio_tienda_ars',
+            'Despacho_Liq_Prom_N2': 'despacho_liq_prom_n2',
+            'Despacho_Liq_Prom_N3': 'despacho_liq_prom_n3',
+            'Despacho_Liq_Prom_Nafta': 'despacho_liq_prom_nafta',
+            'Despacho_Liq_Prom_GO2': 'despacho_liq_prom_go2',
+            'Despacho_Liq_Prom_GO3': 'despacho_liq_prom_go3',
+            'Despacho_Liq_Prom_Gasoil': 'despacho_liq_prom_gasoil',
+            'Despacho_Liq_Prom_Total': 'despacho_liq_prom_total',
+            'Despacho_Cnt_Prom_N3': 'despacho_cnt_prom_n3',
+            'Despacho_Cnt_Prom_Nafta': 'despacho_cnt_prom_nafta',
+            'Despacho_Cnt_Prom_GO2': 'despacho_cnt_prom_go2',
+            'Despacho_Cnt_Prom_GO3': 'despacho_cnt_prom_go3',
+            'Despacho_Cnt_Prom_Gasoil': 'despacho_cnt_prom_gasoil',
+            'Despacho_Cnt_Prom_Total': 'despacho_cnt_prom_total',
+            'Despacho_Vol_Prom_N2': 'despacho_vol_prom_n2',
+            'Despacho_Vol_Prom_N3': 'despacho_vol_prom_n3',
+            'Despacho_Vol_Prom_Nafta': 'despacho_vol_prom_nafta',
+            'Despacho_Vol_Prom_GO2': 'despacho_vol_prom_go2',
+            'Despacho_Vol_Prom_GO3': 'despacho_vol_prom_go3',
+            'Despacho_Vol_Prom_Gasoil': 'despacho_vol_prom_gasoil',
+            'Despacho_Vol_Prom_Total': 'despacho_vol_prom_total',
+            'YPF Ruta Credito_Vol_Prom_N2': 'ypf_ruta_credito_vol_prom_n2',
+            'YPF Ruta Credito_Vol_Prom_N3': 'ypf_ruta_credito_vol_prom_n3',
+            'YPF Ruta Credito_Vol_Prom_Nafta': 'ypf_ruta_credito_vol_prom_nafta',
+            'YPF Ruta Credito_Vol_Prom_GO2': 'ypf_ruta_credito_vol_prom_go2',
+            'YPF Ruta Credito_Vol_Prom_GO3': 'ypf_ruta_credito_vol_prom_go3',
+            'YPF Ruta Credito_Vol_Prom_Gasoil': 'ypf_ruta_credito_vol_prom_gasoil',
+            'YPF Ruta Credito_Vol_Prom_Total': 'ypf_ruta_credito_vol_prom_total',
+            'YPF Ruta Contado_Vol_Prom_N2': 'ypf_ruta_contado_vol_prom_n2',
+            'YPF Ruta Contado_Vol_Prom_N3': 'ypf_ruta_contado_vol_prom_n3',
+            'YPF Ruta Contado_Vol_Prom_Nafta': 'ypf_ruta_contado_vol_prom_nafta',
+            'YPF Ruta Contado_Vol_Prom_GO2': 'ypf_ruta_contado_vol_prom_go2',
+            'YPF Ruta Contado_Vol_Prom_GO3': 'ypf_ruta_contado_vol_prom_go3',
+            'YPF Ruta Contado_Vol_Prom_Gasoil': 'ypf_ruta_contado_vol_prom_gasoil',
+            'YPF Ruta Contado_Vol_Prom_Total': 'ypf_ruta_contado_vol_prom_total',
+            'Serviclub_Penetracion_Por_N2': 'serviclub_penetracion_por_n2',
+            'Serviclub_Penetracion_Por_N3': 'serviclub_penetracion_por_n3',
+            'Serviclub_Penetracion_Por_Nafta': 'serviclub_penetracion_por_nafta',
+            'Serviclub_Penetracion_Por_GO2': 'serviclub_penetracion_por_go2',
+            'Serviclub_Penetracion_Por_GO3': 'serviclub_penetracion_por_go3',
+            'Serviclub_Penetracion_Por_Gasoil': 'serviclub_penetracion_por_gasoil',
+            'Serviclub_Penetracion_Por_Total': 'serviclub_penetracion_por_total',
+            'Serviclub_Vol_Base_N2': 'serviclub_vol_base_n2',
+            'Serviclub_Vol_Base_N3': 'serviclub_vol_base_n3',
+            'Serviclub_Vol_Base_Nafta': 'serviclub_vol_base_nafta',
+            'Serviclub_Vol_Base_GO2': 'serviclub_vol_base_go2',
+            'Serviclub_Vol_Base_GO3': 'serviclub_vol_base_go3',
+            'Serviclub_Vol_Base_Gasoil': 'serviclub_vol_base_gasoil',
+            'Serviclub_Vol_Base_Total': 'serviclub_vol_base_total',
+            'Dotación Actual_Total': 'dotacion_actual_total',
+            'Dotación Actual_Jefes de Estación': 'dotacion_actual_jefes_de_estacion',
+            'Dotación Actual_Jefes Trainee': 'dotacion_actual_jefes_trainee',
+            'Dotación Actual_Responsables de Turno': 'dotacion_actual_responsables_de_turno',
+            'Dotación Actual_Vendedor Dual': 'dotacion_actual_vendedor_dual',
+            'Dotación Actual_Vendedor SR': 'dotacion_actual_vendedor_sr',
+            'Dotación Actual_Lubriexperto': 'dotacion_actual_lubriexperto',
+            'Dotación Actual_Lubriplaya': 'dotacion_actual_lubriplaya',
+            'Descripción Tramo 1': 'descripcion_tramo_1',
+            'Porcentaje Tramo 1': 'porcentaje_tramo_1',
+            'Descripción Tramo 2': 'descripcion_tramo_2',
+            'Porcentaje Tramo 2': 'porcentaje_tramo_2',
+            'CUIT': 'cuit',
+            'Red Propia': 'red_propia',
+            'Zona Exclusión': 'zona_exclusion',
+            'Nivel Socio Económico': 'nivel_socio_economico',
+            'Densidad Poblacional (Hab/km2)': 'densidad_poblacional_hab_por_km2',
+            'Latitud': 'latitud',
+            'Longitud': 'longitud',
+        }
+        
         registros = []
         for _, fila in df.iterrows():
             datos_instancia = {}
             for nombre_col_csv, valor in fila.items():
-                if nombre_col_csv in columnas_db:
-                    campo_para_modelo = columnas_db[nombre_col_csv]
-                    datos_instancia[campo_para_modelo] = valor
+                nombre_col_csv = nombre_col_csv.strip()
+                
+                # Usamos el mapeo para obtener el nombre del atributo de Python
+                nombre_atributo_modelo = columnas_csv_a_modelo_attr.get(nombre_col_csv)
+                
+                if nombre_atributo_modelo:
+                    if pd.isna(valor):
+                        datos_instancia[nombre_atributo_modelo] = None
+                    else:
+                        datos_instancia[nombre_atributo_modelo] = valor
 
-            # Instanciamos así para evitar el error de keyword inválido
-            instancia = BaseLoopEstaciones()
-            for key, val in datos_instancia.items():
-                setattr(instancia, key, val)
+            # Instanciamos el modelo usando el diccionario con los nombres de atributos correctos
+            instancia = BaseLoopEstaciones(**datos_instancia)
             registros.append(instancia)
 
         db.session.bulk_save_objects(registros)
@@ -734,8 +1090,10 @@ def cargar_base_loop():
 
     except SQLAlchemyError as e:
         db.session.rollback()
+        logger.error(f"Error en la base de datos: {e}", exc_info=True)
         return jsonify({"error": f"Error al insertar en la base de datos: {e}"}), 500
     except Exception as e:
+        logger.error(f"Error al procesar el archivo: {e}", exc_info=True)
         return jsonify({"error": f"Error al procesar el archivo: {e}"}), 500
     
 @data_mentor_bp.route('/cargar_fichas_google_competencia', methods=['POST'])
@@ -1002,279 +1360,3 @@ def cargar_comentarios_competencia():
         return jsonify({'error': f'Error al procesar el archivo: {str(e)}'}), 500
     
 
-executor = ThreadPoolExecutor(max_workers=5)
-
-
-# --- Funciones auxiliares (las mismas que ya tienes) ---
-def _wait_for_file_processing(file_id: str):
-    """Espera a que un archivo en OpenAI cambie su estado a 'processed'."""
-    start_time = time.time()
-    max_wait_time = 300 
-    while True:
-        try:
-            file_obj = client.files.retrieve(file_id=file_id)
-            if file_obj.status == "processed":
-                logger.info(f"Archivo {file_id} procesado por OpenAI en {time.time() - start_time:.2f} segundos.")
-                return file_obj
-            elif file_obj.status == "failed":
-                error_message = f"El procesamiento del archivo {file_id} falló en OpenAI. Detalles: {file_obj.last_error.message if file_obj.last_error else 'Desconocido'}."
-                logger.error(error_message)
-                raise Exception(error_message) 
-            else:
-                current_wait_time = time.time() - start_time
-                if current_wait_time > max_wait_time:
-                    error_message = f"Tiempo de espera excedido ({max_wait_time}s) para el procesamiento del archivo {file_id}. Estado actual: {file_obj.status}"
-                    logger.error(error_message)
-                    raise TimeoutError(error_message) 
-                logger.info(f"Archivo {file_id} en estado '{file_obj.status}', esperando... ({current_wait_time:.0f}s / {max_wait_time}s)")
-                time.sleep(5)
-        except Exception as e:
-            logger.error(f"Error al verificar el estado del archivo {file_id}: {e}", exc_info=True)
-            raise 
-
-def _wait_for_vector_store_completion(vector_store_id: str):
-    """Espera a que un Vector Store termine de asimilar todos sus archivos."""
-    start_time = time.time()
-    max_wait_time = 600
-    while True:
-        try:
-            vector_store = client.beta.vector_stores.retrieve(vector_store_id)
-            if vector_store.status == "completed":
-                logger.info(f"Vector Store {vector_store_id} completado en {time.time() - start_time:.2f} segundos.")
-                return vector_store
-            elif vector_store.status in ["failed", "cancelled"]:
-                error_message = f"La creación del Vector Store {vector_store_id} falló. Estado: {vector_store.status}."
-                logger.error(error_message)
-                raise Exception(error_message)
-            else:
-                current_wait_time = time.time() - start_time
-                if current_wait_time > max_wait_time:
-                    error_message = f"Tiempo de espera excedido ({max_wait_time}s) para la creación del Vector Store {vector_store_id}."
-                    logger.error(error_message)
-                    raise TimeoutError(error_message)
-                logger.info(f"Vector Store {vector_store_id} en estado '{vector_store.status}', esperando... ({current_wait_time:.0f}s / {max_wait_time}s)")
-                time.sleep(10)
-        except Exception as e:
-            logger.error(f"Error al verificar el estado del Vector Store {vector_store_id}: {e}", exc_info=True)
-            raise
-
-def _manage_vector_store_async(new_file_ids: list, old_file_id_string: str = None):
-    # La lógica de esta función se integrará de forma síncrona en la nueva ruta.
-    # Así que se puede dejar vacía o simplemente no usarla directamente.
-    pass
-
-# -------------------------------------------------------------------------
-# RUTA PRINCIPAL PARA MÚLTIPLES TABLAS Y SUBDIVISIÓN
-# -------------------------------------------------------------------------
-@data_mentor_bp.route("/actualizar-conocimiento-completo-subdividido", methods=["POST"])
-def actualizar_conocimiento_completo_subdividido():
-    start_time = datetime.now()
-    temp_dir_main = 'temp_master_json'
-    temp_dir_chunks = 'temp_openai_chunks'
-    
-    uploaded_file_ids = []
-    vector_store_id = None
-    
-    MAX_CHUNK_SIZE_MB = 10
-    DB_QUERY_BATCH_SIZE = 10000 
-
-    # Lista de modelos y sus nombres de sección
-    TABLES_TO_INCLUDE = [
-        (Comentarios2025, "comentarios_2025"),
-        (Usuarios_Por_Asignacion, "usuarios_por_asignacion"),
-        (DetalleApies, "detalle_apies"),
-        # ¡Añade aquí el resto de tus tablas!
-        # (FichasGoogle, "fichas_google"),
-        # (FichasGoogleCompetencia, "fichas_google_competencia"),
-        # etc...
-    ]
-    
-    logger.info("======================================================")
-    logger.info("====== INICIANDO PROCESO DE ACTUALIZACIÓN DE CONOCIMIENTO COMPLETO ======")
-    logger.info("======================================================")
-    logger.info(f"Hora de inicio: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info(f"Tamaño máximo por archivo para OpenAI: {MAX_CHUNK_SIZE_MB} MB")
-    
-    try:
-        if not os.path.exists(temp_dir_main): os.makedirs(temp_dir_main)
-        if not os.path.exists(temp_dir_chunks): os.makedirs(temp_dir_chunks)
-        master_json_path = os.path.join(temp_dir_main, "master_knowledge.json")
-        
-        # Paso 1: Generar el JSON maestro de forma eficiente
-        logger.info("Paso 1: Generando el archivo JSON maestro de forma incremental...")
-        resumen_conteos_totales = {}
-        with open(master_json_path, "w", encoding="utf-8") as tmpfile:
-            tmpfile.write('{\n')
-            
-            logger.info("Recopilando conteos totales...")
-            for Model, section_name in TABLES_TO_INCLUDE:
-                count = db.session.query(Model).count()
-                resumen_conteos_totales[section_name] = count
-                logger.info(f"  - {section_name}: {count} registros.")
-            
-            conteos_json_str = json.dumps(resumen_conteos_totales, indent=2, ensure_ascii=False)
-            conteos_json_str_formatted = conteos_json_str.replace("{\n ", "{\n    ").replace("\n}", "\n  }")
-            tmpfile.write(f'  "resumen_conteos_totales": {conteos_json_str_formatted},\n')
-            tmpfile.write('  "descripcion_contenido_archivo": "Este archivo JSON contiene datos operativos y de experiencia del cliente de YPF, organizados por sección. Cada sección incluye conteos y datos detallados.",\n')
-
-            first_section = True
-            for Model, section_name in TABLES_TO_INCLUDE:
-                if not first_section:
-                    tmpfile.write(',\n')
-                first_section = False
-
-                logger.info(f"  - Procesando sección '{section_name}'...")
-                tmpfile.write(f'  "{section_name}": [\n')
-
-                record_count_in_section = 0
-                is_first_record_in_section = True
-
-                offset = 0
-                while True:
-                    batch_of_records = db.session.query(Model).limit(DB_QUERY_BATCH_SIZE).offset(offset).all()
-                    if not batch_of_records:
-                        break
-                    
-                    for item in batch_of_records:
-                        if not is_first_record_in_section:
-                            tmpfile.write(',\n')
-                        else:
-                            is_first_record_in_section = False
-                        
-                        json.dump(item.serialize(), tmpfile, indent=4, ensure_ascii=False)
-                        record_count_in_section += 1
-                    
-                    offset += DB_QUERY_BATCH_SIZE
-                    db.session.remove()
-                    logger.info(f"    - '{section_name}': {record_count_in_section} registros procesados.")
-
-                tmpfile.write('\n  ]') # Cierre del array de datos
-            
-            tmpfile.write('\n}') # Cierre del JSON maestro
-            tmpfile.flush()
-            tmpfile.close()
-            
-        logger.info(f"Archivo JSON maestro creado en: {master_json_path}. Tamaño: {os.path.getsize(master_json_path) / (1024*1024):.2f} MB")
-
-        # Paso 2: Subdividir el JSON maestro de forma segura (CORREGIDO)
-        logger.info(f"Paso 2: Subdividiendo el archivo maestro en chunks de {MAX_CHUNK_SIZE_MB} MB...")
-        chunk_number = 1
-        with open(master_json_path, 'r', encoding='utf-8') as master_file:
-            while True:
-                chunk_text = master_file.read(MAX_CHUNK_SIZE_MB * 1024 * 1024)
-                if not chunk_text:
-                    break
-                
-                # Encontrar el último carácter '}' para no cortar el JSON en un punto inválido
-                last_brace_index = chunk_text.rfind('}')
-                
-                # NO ES NECESARIO CERRAR EL ARCHIVO MAESTRO AQUÍ
-                # Con la siguiente lógica evitamos el cierre manual.
-                
-                # Si el último '}' no se encuentra o no es el último caracter del chunk,
-                # significa que el JSON está cortado. Retrocedemos el puntero del archivo
-                if last_brace_index != len(chunk_text) - 1:
-                    master_file.seek(master_file.tell() - (len(chunk_text) - last_brace_index - 1))
-                    chunk_text = chunk_text[:last_brace_index + 1]
-
-                # Escribir el chunk en un archivo temporal y cerrarlo
-                current_chunk_path = os.path.join(temp_dir_chunks, f"knowledge_chunk_{chunk_number}.json")
-                with open(current_chunk_path, 'w', encoding='utf-8') as chunk_file:
-                    chunk_file.write(chunk_text)
-                
-                chunk_number += 1
-                
-        generated_chunks = [os.path.join(temp_dir_chunks, f) for f in os.listdir(temp_dir_chunks) if f.endswith('.json')]
-        if not generated_chunks:
-            raise Exception("La subdivisión de archivos falló.")
-        
-        # Paso 3: Subir todos los chunks a OpenAI y esperar a que sean procesados
-        logger.info("Paso 3: Subiendo y esperando a que todos los chunks sean procesados...")
-        
-        for file_path in generated_chunks:
-            with open(file_path, "rb") as file_to_upload:
-                uploaded_file = client.files.create(
-                    file=file_to_upload,
-                    purpose="assistants"
-                )
-            uploaded_file_ids.append(uploaded_file.id)
-            logger.info(f"Chunk subido: '{os.path.basename(file_path)}', File ID: {uploaded_file.id}")
-            _wait_for_file_processing(uploaded_file.id)
-
-        # Paso 4: Crear el Vector Store con todos los archivos procesados
-        logger.info("Paso 4: Todos los chunks procesados. Creando un único Vector Store...")
-        
-        vector_store = client.beta.vector_stores.create(
-            name="Conocimiento Completo Base",
-            file_ids=uploaded_file_ids
-        )
-        vector_store_id = vector_store.id
-        logger.info(f"Vector Store creado. ID: {vector_store_id}. Esperando a que se complete la asimilación...")
-        _wait_for_vector_store_completion(vector_store_id)
-        
-        # Paso 5: Actualizar la base de datos
-        logger.info(f"Paso 5: Actualizando la base de datos...")
-        existing_file_record = FileDailyID.query.first()
-        old_file_id = existing_file_record.current_file_id if existing_file_record else None
-        
-        # Eliminar archivos obsoletos online por sus files id
-        if old_file_id:
-            old_file_ids_list = old_file_id.split(',')
-            for old_id in old_file_ids_list:
-                try:
-                    # Desasociar del Vector Store
-                    client.beta.vector_stores.files.delete(
-                        vector_store_id=existing_file_record.current_vector_store_id,
-                        file_id=old_id
-                    )
-                    # Eliminar el archivo del almacenamiento
-                    client.files.delete(old_id)
-                    logger.info(f"Archivo obsoleto '{old_id}' eliminado.")
-                except Exception as e:
-                    logger.warning(f"Error al eliminar archivo obsoleto '{old_id}': {e}")
-
-        if existing_file_record:
-            existing_file_record.current_file_id = ','.join(uploaded_file_ids)
-            existing_file_record.current_vector_store_id = vector_store_id
-        else:
-            new_record = FileDailyID(
-                current_file_id=','.join(uploaded_file_ids),
-                current_vector_store_id=vector_store_id
-            )
-            db.session.add(new_record)
-            
-        db.session.commit()
-        logger.info(f"DB actualizada. Vector Store ID: {vector_store_id}.")
-
-        end_time = datetime.now()
-        time_elapsed = end_time - start_time
-        seconds = int(time_elapsed.total_seconds())
-        time_format = str(timedelta(seconds=seconds))
-        
-        logger.info("======================================================")
-        logger.info("============ PROCESO FINALIZADO CON ÉXITO ============")
-        logger.info(f"Tiempo total: {time_format}")
-        logger.info("======================================================")
-
-        return jsonify({
-            "success": True,
-            "message": f"Se generó el conocimiento completo a partir de {len(TABLES_TO_INCLUDE)} tablas.",
-            "vector_store_id": vector_store_id,
-            "archivos_creados": uploaded_file_ids,
-            "tiempo_total": time_format
-        }), 200
-
-    except Exception as e:
-        db.session.rollback() 
-        logger.error(f"Error fatal durante el proceso: {str(e)}", exc_info=True)
-        end_time = datetime.now()
-        time_elapsed_on_error = end_time - start_time
-        seconds_on_error = int(time_elapsed_on_error.total_seconds())
-        time_format_on_error = str(timedelta(seconds=seconds_on_error))
-        return jsonify({"error": str(e), "status": 500, "tiempo_transcurrido_hasta_error": time_format_on_error}), 500
-    finally:
-        if os.path.exists(temp_dir_main): shutil.rmtree(temp_dir_main)
-        if os.path.exists(temp_dir_chunks): shutil.rmtree(temp_dir_chunks)
-        # Asegúrate de importar shutil
-        # import shutil
-        logger.info("Directorios temporales eliminados.")
