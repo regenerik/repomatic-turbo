@@ -16,7 +16,7 @@ from sqlalchemy.exc import SQLAlchemyError
 import csv, textwrap
 import time
 import re
-from openai import OpenAI, APIError
+from openai import OpenAI, APIError, APITimeoutError
 from tempfile import NamedTemporaryFile
 import openpyxl
 from io import BytesIO
@@ -28,8 +28,8 @@ from typing import Dict, Any, List
 
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-# OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1")
-OPENAI_MODEL= "gpt-3.5-turbo"
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1")
+# OPENAI_MODEL= "gpt-3.5-turbo"
 if not OPENAI_API_KEY:
     raise ValueError("Debes definir la variable de entorno OPENAI_API_KEY con tu clave de API.")
 
@@ -510,22 +510,22 @@ def fix_instructions_by_error():
         logger.info("DEBUG: Esquema de tablas generado.")
 
         prompt_template = textwrap.dedent("""
-        Tengo un error en las instrucciones que le doy a mi flow para capturar sql de mi propia base de datos.
-        Las instrucciones actuales son las siguientes:
+        Analiza el siguiente error de un sistema de IA que genera SQL. Tienes la tarea de mejorar las instrucciones que guían a esa IA para que no cometa el mismo error en el futuro.
+
+        Instrucciones actuales:
         {instrucciones_actuales}
 
-        El error es que el usuario hizo una pregunta y la respuesta estaba equivocada. Te muestro la información:
-        Pregunta del usuario: "{pregunta_usuario}"
-        Respuesta fallida: "{respuesta_fallida}"
-        SQL utilizado: "{sql_utilizado}"
+        Detalles del error:
+        - Pregunta del usuario: "{pregunta_usuario}"
+        - Respuesta fallida de la IA: "{respuesta_fallida}"
+        - SQL incorrecto utilizado: "{sql_utilizado}"
 
-        Para que entiendas, acá te dejo la estructura de mis tablas y sus columnas, para que veas si podes mejorar las instrucciones que te pasé al principio y así ese error no vuelva a ocurrir.
-        Estructura de tablas:
+        Contexto para la mejora:
+        - Estructura de las tablas:
         {esquema_tablas}
 
-        Si las instrucciones actuales ya son adecuadas y el error no se debe a ellas, por favor devuélvelas sin cambios y explica por qué.
-
-        Necesito que me contestes con el siguiente formato, sin texto adicional:
+        Si las instrucciones actuales son la causa del error, corrígelas. Si son correctas y el error parece ser una alucinación de la IA, explica que las instrucciones son adecuadas y no se necesitan cambios.
+        Tu respuesta debe tener el siguiente formato, sin ningún texto adicional:
         NUEVA_INSTRUCCION:"<la nueva instrucción mejorada o la misma si no hay cambios>"
         MOTIVO_EXPLICACION: "<el por qué de los cambios en 1-2 oraciones o el por qué no se cambió nada>"
         """)
@@ -537,10 +537,10 @@ def fix_instructions_by_error():
             sql_utilizado=reporte.sql_query if reporte.sql_query else "No se utilizó SQL.",
             esquema_tablas=esquema_tablas
         )
-        logger.info(f"DEBUG: Tamaño del prompt a enviar: {len(llm_prompt)} caracteres.")
+        
+        logger.info("DEBUG: Tamaño del prompt a enviar: %s caracteres.", len(llm_prompt))
         logger.info("DEBUG: Prompt para el LLM construido. Llamando a la API de OpenAI...")
 
-        # Aquí refactorizamos la llamada para usar kwargs y un timeout explícito
         messages = [
             {"role": "system", "content": "Eres un asistente experto en optimización de instrucciones para modelos de lenguaje. Tu única tarea es analizar un error y proponer una nueva instrucción mejorada. Si las instrucciones son correctas, devuélvelas sin cambios y explícame por qué."},
             {"role": "user", "content": llm_prompt}
@@ -548,8 +548,7 @@ def fix_instructions_by_error():
         kwargs = {
             "model": OPENAI_MODEL,
             "messages": messages,
-            "response_format": {"type": "json_object"},
-            "timeout": 120.0  # Timeout en segundos para la solicitud
+            "timeout": 120.0
         }
 
         try:
@@ -560,23 +559,22 @@ def fix_instructions_by_error():
             llm_text_out = response_llm.choices[0].message.content
             logger.info(f"DEBUG: Respuesta cruda del LLM:\n{llm_text_out}")
 
-            response_json = json.loads(llm_text_out)
-            nueva_instruccion = response_json.get("NUEVA_INSTRUCCION", "")
-            motivo_explicacion = response_json.get("MOTIVO_EXPLICACION", "")
-        except APIError as api_error:
-            logger.error(f"ERROR: Fallo de la API de OpenAI: {api_error.response.text}")
-            return jsonify({"error": f"Fallo de la API de OpenAI: {api_error.response.text}"}), 500
-        except json.JSONDecodeError as json_error:
-            logger.error(f"ERROR: No se pudo decodificar la respuesta JSON del LLM: {json_error}")
-            logger.error(f"Respuesta cruda del LLM: {llm_text_out}")
+            # Lógica para parsear texto plano
             nueva_instruccion_match = re.search(r'NUEVA_INSTRUCCION:"(.*?)"', llm_text_out, re.DOTALL)
             motivo_explicacion_match = re.search(r'MOTIVO_EXPLICACION:"(.*?)"', llm_text_out, re.DOTALL)
+            
             nueva_instruccion = nueva_instruccion_match.group(1) if nueva_instruccion_match else ""
             motivo_explicacion = motivo_explicacion_match.group(1) if motivo_explicacion_match else ""
-            if not nueva_instruccion:
-                 return jsonify({"error": "No se pudo extraer la nueva instrucción del LLM."}), 500
+
+        except APITimeoutError:
+            error_msg = "La API de OpenAI excedió el tiempo de espera. Por favor, intenta de nuevo."
+            logger.error(f"ERROR: Fallo de la API de OpenAI por timeout. Mensaje: {error_msg}")
+            return jsonify({"error": error_msg}), 500
+        except APIError as api_error:
+            logger.error(f"ERROR: Fallo de la API de OpenAI: %s", api_error.response.text)
+            return jsonify({"error": f"Fallo de la API de OpenAI: {api_error.response.text}"}), 500
         except Exception as e:
-            logger.error(f"ERROR: Error inesperado al procesar la respuesta del LLM: {str(e)}")
+            logger.error("ERROR: Error inesperado al procesar la respuesta del LLM: %s", str(e))
             return jsonify({"error": f"Error al procesar la respuesta de la IA: {str(e)}"}), 500
 
         if not nueva_instruccion:
@@ -586,7 +584,7 @@ def fix_instructions_by_error():
         logger.info("DEBUG: Respuesta del LLM parseada con éxito.")
         reporte.resolved = True
         db.session.commit()
-        logger.info(f"DEBUG: Reporte {report_id} marcado como resuelto.")
+        logger.info("DEBUG: Reporte %s marcado como resuelto.", report_id)
 
         logger.info("DEBUG: Enviando respuesta al frontend.")
         return jsonify({
@@ -596,7 +594,7 @@ def fix_instructions_by_error():
 
     except Exception as e:
         db.session.rollback()
-        logger.error(f"ERROR: Fallo inesperado en fix_instructions_by_error: {str(e)}")
+        logger.error("ERROR: Fallo inesperado en fix_instructions_by_error: %s", str(e))
         return jsonify({"error": f"Fallo inesperado: {str(e)}"}), 500
 
 #-------------------------------------------------
