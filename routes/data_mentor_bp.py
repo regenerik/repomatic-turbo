@@ -28,7 +28,7 @@ from typing import Dict, Any, List
 
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1")
 if not OPENAI_API_KEY:
     raise ValueError("Debes definir la variable de entorno OPENAI_API_KEY con tu clave de API.")
 
@@ -536,7 +536,7 @@ def fix_instructions_by_error():
             sql_utilizado=reporte.sql_query if reporte.sql_query else "No se utilizó SQL.",
             esquema_tablas=esquema_tablas
         )
-        
+        logger.info(f"DEBUG: Tamaño del prompt a enviar: {len(llm_prompt)} caracteres.")
         logger.info("DEBUG: Prompt para el LLM construido. Llamando a la API de OpenAI...")
 
         # Aquí refactorizamos la llamada para usar kwargs y un timeout explícito
