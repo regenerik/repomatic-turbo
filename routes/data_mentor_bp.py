@@ -474,9 +474,17 @@ def build_db_schema_narrative(whitelist: List[str] | None = None, max_cols: int 
         lines.append(_table_summary(insp, t, max_cols=max_cols))
     return "\n".join(lines)
 
+
 @data_mentor_bp.route("/fix_instructions_by_error", methods=["POST"])
 def fix_instructions_by_error():
     try:
+        # --- NUEVA VERIFICACIÓN AL INICIO ---
+        if not client.api_key:
+            error_msg = "La clave de la API de OpenAI no está configurada en el servidor."
+            print(f"FATAL ERROR: {error_msg}")
+            return jsonify({"error": error_msg}), 500
+        # --- FIN DE LA NUEVA VERIFICACIÓN ---
+        
         data = request.get_json()
         report_id = data.get("id")
 
@@ -486,7 +494,6 @@ def fix_instructions_by_error():
 
         print(f"DEBUG: Procesando el reporte con ID: {report_id}")
 
-        # 1. Obtener los datos del reporte de error
         reporte = ReportesDataMentor.query.get(report_id)
         if not reporte:
             print(f"ERROR: Reporte con ID {report_id} no encontrado.")
@@ -494,7 +501,6 @@ def fix_instructions_by_error():
 
         print("DEBUG: Reporte encontrado. Obteniendo las instrucciones actuales...")
 
-        # 2. Obtener las instrucciones más nuevas
         instrucciones_actuales = Instructions.query.order_by(Instructions.created_at.desc()).first()
         if not instrucciones_actuales:
             print("ERROR: No hay instrucciones de IA disponibles.")
@@ -502,11 +508,9 @@ def fix_instructions_by_error():
 
         print("DEBUG: Instrucciones actuales encontradas. Obteniendo el esquema de tablas...")
 
-        # 3. Obtener el esquema de las tablas
         esquema_tablas = build_db_schema_narrative(whitelist=TABLES_WHITELIST)
         print("DEBUG: Esquema de tablas generado.")
 
-        # 4. Construir el super-prompt para el LLM
         prompt_template = textwrap.dedent("""
         Tengo un error en las instrucciones que le doy a mi flow para capturar sql de mi propia base de datos.
         Las instrucciones actuales son las siguientes:
@@ -538,7 +542,6 @@ def fix_instructions_by_error():
         
         print("DEBUG: Prompt para el LLM construido. Llamando a la API de OpenAI...")
 
-        # 5. Llamar al LLM para obtener la respuesta
         t0 = time.time()
         try:
             response_llm = client.chat.completions.create(
@@ -554,19 +557,15 @@ def fix_instructions_by_error():
             llm_text_out = response_llm.choices[0].message.content
             print(f"DEBUG: Respuesta cruda del LLM:\n{llm_text_out}")
 
-            # 6. Parsear la respuesta del LLM
             response_json = json.loads(llm_text_out)
             nueva_instruccion = response_json.get("NUEVA_INSTRUCCION", "")
             motivo_explicacion = response_json.get("MOTIVO_EXPLICACION", "")
         except APIError as api_error:
-            # Capturar errores específicos de la API de OpenAI (e.g., timeout, rate limit)
             print(f"ERROR: Fallo de la API de OpenAI: {api_error.response.text}")
             return jsonify({"error": f"Fallo de la API de OpenAI: {api_error.response.text}"}), 500
         except json.JSONDecodeError as json_error:
-            # Capturar errores si la respuesta no es un JSON válido
             print(f"ERROR: No se pudo decodificar la respuesta JSON del LLM: {json_error}")
             print(f"Respuesta cruda del LLM: {llm_text_out}")
-            # Intento de extracción con regex como fallback
             nueva_instruccion_match = re.search(r'NUEVA_INSTRUCCION:"(.*?)"', llm_text_out, re.DOTALL)
             motivo_explicacion_match = re.search(r'MOTIVO_EXPLICACION:"(.*?)"', llm_text_out, re.DOTALL)
             nueva_instruccion = nueva_instruccion_match.group(1) if nueva_instruccion_match else ""
@@ -583,12 +582,10 @@ def fix_instructions_by_error():
 
         print("DEBUG: Respuesta del LLM parseada con éxito.")
 
-        # 7. Opcional: Actualizar el reporte a "resuelto"
         reporte.resolved = True
         db.session.commit()
         print(f"DEBUG: Reporte {report_id} marcado como resuelto.")
 
-        # 8. Devolver la nueva instrucción y el motivo al frontend
         print("DEBUG: Enviando respuesta al frontend.")
         return jsonify({
             "nueva_instruccion": nueva_instruccion,
@@ -597,7 +594,6 @@ def fix_instructions_by_error():
 
     except Exception as e:
         db.session.rollback()
-        # Esto es crucial: asegura que el error real se registre y se devuelva
         print(f"ERROR: Fallo inesperado en fix_instructions_by_error: {str(e)}")
         return jsonify({"error": f"Fallo inesperado: {str(e)}"}), 500
 
