@@ -477,39 +477,37 @@ def build_db_schema_narrative(whitelist: List[str] | None = None, max_cols: int 
 
 @data_mentor_bp.route("/fix_instructions_by_error", methods=["POST"])
 def fix_instructions_by_error():
+    # Verificar si el cliente de OpenAI se inicializó correctamente
+    if client is None:
+        error_msg = "Error de configuración del servidor: La clave de la API de OpenAI no es válida."
+        logger.error(error_msg)
+        return jsonify({"error": error_msg}), 500
+
     try:
-        # --- NUEVA VERIFICACIÓN AL INICIO ---
-        if not client.api_key:
-            error_msg = "La clave de la API de OpenAI no está configurada en el servidor."
-            print(f"FATAL ERROR: {error_msg}")
-            return jsonify({"error": error_msg}), 500
-        # --- FIN DE LA NUEVA VERIFICACIÓN ---
-        
         data = request.get_json()
         report_id = data.get("id")
 
         if not report_id:
-            print("ERROR: Falta el ID del reporte.")
+            logger.error("ERROR: Falta el ID del reporte.")
             return jsonify({"error": "Falta el ID del reporte."}), 400
 
-        print(f"DEBUG: Procesando el reporte con ID: {report_id}")
+        logger.info(f"DEBUG: Procesando el reporte con ID: {report_id}")
 
         reporte = ReportesDataMentor.query.get(report_id)
         if not reporte:
-            print(f"ERROR: Reporte con ID {report_id} no encontrado.")
+            logger.error(f"ERROR: Reporte con ID {report_id} no encontrado.")
             return jsonify({"error": "Reporte no encontrado."}), 404
 
-        print("DEBUG: Reporte encontrado. Obteniendo las instrucciones actuales...")
+        logger.info("DEBUG: Reporte encontrado. Obteniendo las instrucciones actuales...")
 
         instrucciones_actuales = Instructions.query.order_by(Instructions.created_at.desc()).first()
         if not instrucciones_actuales:
-            print("ERROR: No hay instrucciones de IA disponibles.")
+            logger.error("ERROR: No hay instrucciones de IA disponibles.")
             return jsonify({"error": "No hay instrucciones de IA disponibles."}), 500
 
-        print("DEBUG: Instrucciones actuales encontradas. Obteniendo el esquema de tablas...")
-
+        logger.info("DEBUG: Instrucciones actuales encontradas. Obteniendo el esquema de tablas...")
         esquema_tablas = build_db_schema_narrative(whitelist=TABLES_WHITELIST)
-        print("DEBUG: Esquema de tablas generado.")
+        logger.info("DEBUG: Esquema de tablas generado.")
 
         prompt_template = textwrap.dedent("""
         Tengo un error en las instrucciones que le doy a mi flow para capturar sql de mi propia base de datos.
@@ -540,7 +538,7 @@ def fix_instructions_by_error():
             esquema_tablas=esquema_tablas
         )
         
-        print("DEBUG: Prompt para el LLM construido. Llamando a la API de OpenAI...")
+        logger.info("DEBUG: Prompt para el LLM construido. Llamando a la API de OpenAI...")
 
         t0 = time.time()
         try:
@@ -553,19 +551,19 @@ def fix_instructions_by_error():
                 response_format={"type": "json_object"}
             )
             llm_latency = time.time() - t0
-            print(f"DEBUG: Respuesta del LLM recibida en {llm_latency:.2f} segundos.")
+            logger.info(f"DEBUG: Respuesta del LLM recibida en {llm_latency:.2f} segundos.")
             llm_text_out = response_llm.choices[0].message.content
-            print(f"DEBUG: Respuesta cruda del LLM:\n{llm_text_out}")
+            logger.info(f"DEBUG: Respuesta cruda del LLM:\n{llm_text_out}")
 
             response_json = json.loads(llm_text_out)
             nueva_instruccion = response_json.get("NUEVA_INSTRUCCION", "")
             motivo_explicacion = response_json.get("MOTIVO_EXPLICACION", "")
         except APIError as api_error:
-            print(f"ERROR: Fallo de la API de OpenAI: {api_error.response.text}")
+            logger.error(f"ERROR: Fallo de la API de OpenAI: {api_error.response.text}")
             return jsonify({"error": f"Fallo de la API de OpenAI: {api_error.response.text}"}), 500
         except json.JSONDecodeError as json_error:
-            print(f"ERROR: No se pudo decodificar la respuesta JSON del LLM: {json_error}")
-            print(f"Respuesta cruda del LLM: {llm_text_out}")
+            logger.error(f"ERROR: No se pudo decodificar la respuesta JSON del LLM: {json_error}")
+            logger.error(f"Respuesta cruda del LLM: {llm_text_out}")
             nueva_instruccion_match = re.search(r'NUEVA_INSTRUCCION:"(.*?)"', llm_text_out, re.DOTALL)
             motivo_explicacion_match = re.search(r'MOTIVO_EXPLICACION:"(.*?)"', llm_text_out, re.DOTALL)
             nueva_instruccion = nueva_instruccion_match.group(1) if nueva_instruccion_match else ""
@@ -573,20 +571,19 @@ def fix_instructions_by_error():
             if not nueva_instruccion:
                  return jsonify({"error": "No se pudo extraer la nueva instrucción del LLM."}), 500
         except Exception as e:
-            print(f"ERROR: Error inesperado al procesar la respuesta del LLM: {str(e)}")
+            logger.error(f"ERROR: Error inesperado al procesar la respuesta del LLM: {str(e)}")
             return jsonify({"error": f"Error al procesar la respuesta de la IA: {str(e)}"}), 500
 
         if not nueva_instruccion:
-            print("ERROR: El LLM devolvió un formato incorrecto y no se pudo extraer la instrucción.")
+            logger.error("ERROR: El LLM devolvió un formato incorrecto y no se pudo extraer la instrucción.")
             return jsonify({"error": "El LLM no devolvió la nueva instrucción."}), 500
 
-        print("DEBUG: Respuesta del LLM parseada con éxito.")
-
+        logger.info("DEBUG: Respuesta del LLM parseada con éxito.")
         reporte.resolved = True
         db.session.commit()
-        print(f"DEBUG: Reporte {report_id} marcado como resuelto.")
+        logger.info(f"DEBUG: Reporte {report_id} marcado como resuelto.")
 
-        print("DEBUG: Enviando respuesta al frontend.")
+        logger.info("DEBUG: Enviando respuesta al frontend.")
         return jsonify({
             "nueva_instruccion": nueva_instruccion,
             "motivo_explicacion": motivo_explicacion
@@ -594,9 +591,8 @@ def fix_instructions_by_error():
 
     except Exception as e:
         db.session.rollback()
-        print(f"ERROR: Fallo inesperado en fix_instructions_by_error: {str(e)}")
+        logger.error(f"ERROR: Fallo inesperado en fix_instructions_by_error: {str(e)}")
         return jsonify({"error": f"Fallo inesperado: {str(e)}"}), 500
-
 #-------------------------------------------------
 
 
