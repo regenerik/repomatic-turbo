@@ -477,7 +477,6 @@ def build_db_schema_narrative(whitelist: List[str] | None = None, max_cols: int 
 
 @data_mentor_bp.route("/fix_instructions_by_error", methods=["POST"])
 def fix_instructions_by_error():
-    # Verificar si el cliente de OpenAI se inicializó correctamente
     if client is None:
         error_msg = "Error de configuración del servidor: La clave de la API de OpenAI no es válida."
         logger.error(error_msg)
@@ -540,16 +539,21 @@ def fix_instructions_by_error():
         
         logger.info("DEBUG: Prompt para el LLM construido. Llamando a la API de OpenAI...")
 
-        t0 = time.time()
+        # Aquí refactorizamos la llamada para usar kwargs y un timeout explícito
+        messages = [
+            {"role": "system", "content": "Eres un asistente experto en optimización de instrucciones para modelos de lenguaje. Tu única tarea es analizar un error y proponer una nueva instrucción mejorada. Si las instrucciones son correctas, devuélvelas sin cambios y explícame por qué."},
+            {"role": "user", "content": llm_prompt}
+        ]
+        kwargs = {
+            "model": OPENAI_MODEL,
+            "messages": messages,
+            "response_format": {"type": "json_object"},
+            "timeout": 30.0  # Timeout en segundos para la solicitud
+        }
+
         try:
-            response_llm = client.chat.completions.create(
-                model=OPENAI_MODEL,
-                messages=[
-                    {"role": "system", "content": "Eres un asistente experto en optimización de instrucciones para modelos de lenguaje. Tu única tarea es analizar un error y proponer una nueva instrucción mejorada. Si las instrucciones son correctas, devuélvelas sin cambios y explícame por qué."},
-                    {"role": "user", "content": llm_prompt}
-                ],
-                response_format={"type": "json_object"}
-            )
+            t0 = time.time()
+            response_llm = client.chat.completions.create(**kwargs)
             llm_latency = time.time() - t0
             logger.info(f"DEBUG: Respuesta del LLM recibida en {llm_latency:.2f} segundos.")
             llm_text_out = response_llm.choices[0].message.content
@@ -593,6 +597,7 @@ def fix_instructions_by_error():
         db.session.rollback()
         logger.error(f"ERROR: Fallo inesperado en fix_instructions_by_error: {str(e)}")
         return jsonify({"error": f"Fallo inesperado: {str(e)}"}), 500
+
 #-------------------------------------------------
 
 
