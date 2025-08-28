@@ -509,7 +509,6 @@ def fix_instructions_by_error():
         esquema_tablas = build_db_schema_narrative(whitelist=TABLES_WHITELIST)
         logger.info("DEBUG: Esquema de tablas generado.")
 
-        # --- PROMPT MEJORADO Y ESTRICTO ---
         prompt_template = textwrap.dedent("""
         Analiza el siguiente error de un sistema de IA que genera SQL. Tienes la tarea de mejorar las instrucciones que guían a esa IA para que no cometa el mismo error en el futuro.
 
@@ -530,8 +529,8 @@ def fix_instructions_by_error():
         Si las instrucciones actuales son adecuadas y el error no se debe a ellas, por favor devuélvelas sin cambios y explica el motivo.
 
         Tu respuesta debe tener **exactamente** el siguiente formato textual, sin ningún texto adicional, caracteres especiales o JSON:
-        NUEVA_INSTRUCCION:"{nueva_instruccion_aqui}"
-        MOTIVO_EXPLICACION:"{motivo_de_los_cambios_aqui}"
+        NUEVA_INSTRUCCION:"{nueva_instruccion}"
+        MOTIVO_EXPLICACION:"{motivo_de_los_cambios}"
         """)
 
         llm_prompt = prompt_template.format(
@@ -539,7 +538,9 @@ def fix_instructions_by_error():
             pregunta_usuario=reporte.question,
             respuesta_fallida=reporte.failed_answer,
             sql_utilizado=reporte.sql_query if reporte.sql_query else "No se utilizó SQL.",
-            esquema_tablas=esquema_tablas
+            esquema_tablas=esquema_tablas,
+            nueva_instruccion="", # Se eliminaron los placeholders del template
+            motivo_de_los_cambios="" # Se eliminaron los placeholders del template
         )
         
         logger.info(f"DEBUG: Tamaño del prompt a enviar: %s caracteres.", len(llm_prompt))
@@ -563,7 +564,6 @@ def fix_instructions_by_error():
             llm_text_out = response_llm.choices[0].message.content
             logger.info(f"DEBUG: Respuesta cruda del LLM:\n{llm_text_out}")
 
-            # Lógica para parsear texto plano con regex
             nueva_instruccion_match = re.search(r'NUEVA_INSTRUCCION:"(.*?)"', llm_text_out, re.DOTALL)
             motivo_explicacion_match = re.search(r'MOTIVO_EXPLICACION:"(.*?)"', llm_text_out, re.DOTALL)
             
