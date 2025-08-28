@@ -974,3 +974,33 @@ class HistoryUserCourses(db.Model):
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
+    
+
+
+class ReportesDataMentor(db.Model):
+    __tablename__ = 'reportes_data_mentor'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user = db.Column(db.String(255), nullable=False)
+    user_dni = db.Column(db.String(50), nullable=True)
+    question = db.Column(db.Text, nullable=False)
+    failed_answer = db.Column(db.Text, nullable=False)
+    sql_query = db.Column(db.Text, nullable=True)
+    resolved = db.Column(db.Boolean, default=False)
+    solution = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    modified_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def serialize(self):
+        return {
+            "id": self.id,
+            "user": self.user,
+            "user_dni": self.user_dni,
+            "question": self.question,
+            "failed_answer": self.failed_answer,
+            "sql_query": self.sql_query,
+            "resolved": self.resolved,
+            "solution": self.solution,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "modified_at": self.modified_at.isoformat() if self.modified_at else None,
+        }

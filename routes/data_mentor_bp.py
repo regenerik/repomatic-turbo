@@ -11,7 +11,7 @@ import urllib.request
 import urllib.error
 import json
 import pandas as pd
-from models import Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas,FormularioGestor,CuartoSurveySql, QuintoSurveySql, Comentarios2023, Comentarios2024, Comentarios2025, BaseLoopEstaciones, FichasGoogleCompetencia, FichasGoogle, SalesForce, ComentariosCompetencia, FileDailyID
+from models import User, ReportesDataMentor ,Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas,FormularioGestor,CuartoSurveySql, QuintoSurveySql, Comentarios2023, Comentarios2024, Comentarios2025, BaseLoopEstaciones, FichasGoogleCompetencia, FichasGoogle, SalesForce, ComentariosCompetencia, FileDailyID
 from sqlalchemy.exc import SQLAlchemyError
 import csv, textwrap
 import time
@@ -320,6 +320,58 @@ def chat_mentor():
             "router_ms": int(router.get("_router_latency",0)*1000)
         }
     }), 200
+
+@data_mentor_bp.route("/report_to_data_mentor", methods=["POST"])
+def report_error_data_mentor():
+    try:
+        data = request.json
+        if not data:
+            return jsonify({"error": "No se recibieron datos JSON"}), 400
+
+        user_email = data.get("user")
+        if not user_email:
+            return jsonify({"error": "El campo 'user' (email) es requerido"}), 400
+        
+        question = data.get("question")
+        failed_answer = data.get("failed_answer")
+        sql_query = data.get("sql_query")
+
+        # Buscar el usuario por email para obtener el DNI
+        user_record = User.query.filter_by(email=user_email).first()
+        user_dni = user_record.dni if user_record else None
+
+        # Crear una nueva instancia de ReportesDataMentor
+        new_report = ReportesDataMentor(
+            user=user_email,
+            user_dni=user_dni,
+            question=question,
+            failed_answer=failed_answer,
+            sql_query=sql_query,
+            resolved=False
+        )
+
+        db.session.add(new_report)
+        db.session.commit()
+
+        return jsonify({"message": "Reporte de error guardado exitosamente"}), 201
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+@data_mentor_bp.route("/get_reports_of_data_mentor", methods=["GET"])
+def get_reports_of_data_mentor():
+    try:
+        # Obtener todos los reportes de la base de datos
+        reports = ReportesDataMentor.query.all()
+
+        # Serializar la lista de reportes
+        serialized_reports = [report.serialize() for report in reports]
+
+        return jsonify(serialized_reports), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @data_mentor_bp.route("/close_chat_mentor", methods=["POST"])
 def close_chat():
