@@ -509,8 +509,11 @@ def fix_instructions_by_error():
         esquema_tablas = build_db_schema_narrative(whitelist=TABLES_WHITELIST)
         logger.info("DEBUG: Esquema de tablas generado.")
 
+        # --- PROMPT MEJORADO Y ESTRICTO ---
         prompt_template = textwrap.dedent("""
         Analiza el siguiente error de un sistema de IA que genera SQL. Tienes la tarea de mejorar las instrucciones que guían a esa IA para que no cometa el mismo error en el futuro.
+
+        **REGLA CRÍTICA:** Al mejorar las instrucciones, asegúrate de **mantener la totalidad del contenido original** y solo añadir o modificar lo necesario para corregir el error. La coherencia del sistema depende de mantener las instrucciones previas.
 
         Instrucciones actuales:
         {instrucciones_actuales}
@@ -524,10 +527,11 @@ def fix_instructions_by_error():
         - Estructura de las tablas:
         {esquema_tablas}
 
-        Si las instrucciones actuales son la causa del error, corrígelas. Si son correctas y el error parece ser una alucinación de la IA, explica que las instrucciones son adecuadas y no se necesitan cambios.
-        Tu respuesta debe tener el siguiente formato, sin ningún texto adicional:
-        NUEVA_INSTRUCCION:"<la nueva instrucción mejorada o la misma si no hay cambios>"
-        MOTIVO_EXPLICACION: "<el por qué de los cambios en 1-2 oraciones o el por qué no se cambió nada>"
+        Si las instrucciones actuales son adecuadas y el error no se debe a ellas, por favor devuélvelas sin cambios y explica el motivo.
+
+        Tu respuesta debe tener **exactamente** el siguiente formato textual, sin ningún texto adicional, caracteres especiales o JSON:
+        NUEVA_INSTRUCCION:"{nueva_instruccion_aqui}"
+        MOTIVO_EXPLICACION:"{motivo_de_los_cambios_aqui}"
         """)
 
         llm_prompt = prompt_template.format(
@@ -538,7 +542,7 @@ def fix_instructions_by_error():
             esquema_tablas=esquema_tablas
         )
         
-        logger.info("DEBUG: Tamaño del prompt a enviar: %s caracteres.", len(llm_prompt))
+        logger.info(f"DEBUG: Tamaño del prompt a enviar: %s caracteres.", len(llm_prompt))
         logger.info("DEBUG: Prompt para el LLM construido. Llamando a la API de OpenAI...")
 
         messages = [
@@ -559,7 +563,7 @@ def fix_instructions_by_error():
             llm_text_out = response_llm.choices[0].message.content
             logger.info(f"DEBUG: Respuesta cruda del LLM:\n{llm_text_out}")
 
-            # Lógica para parsear texto plano
+            # Lógica para parsear texto plano con regex
             nueva_instruccion_match = re.search(r'NUEVA_INSTRUCCION:"(.*?)"', llm_text_out, re.DOTALL)
             motivo_explicacion_match = re.search(r'MOTIVO_EXPLICACION:"(.*?)"', llm_text_out, re.DOTALL)
             
