@@ -509,6 +509,7 @@ def fix_instructions_by_error():
         esquema_tablas = build_db_schema_narrative(whitelist=TABLES_WHITELIST)
         logger.info("DEBUG: Esquema de tablas generado.")
 
+        # --- PROMPT MEJORADO Y MÁS EXPLÍCITO SOBRE EL ORDEN ---
         prompt_template = textwrap.dedent("""
         Analiza el siguiente error de un sistema de IA que genera SQL. Tienes la tarea de mejorar las instrucciones que guían a esa IA para que no cometa el mismo error en el futuro.
 
@@ -528,7 +529,8 @@ def fix_instructions_by_error():
 
         Si las instrucciones actuales son adecuadas y el error no se debe a ellas, por favor devuélvelas sin cambios y explica el motivo.
 
-        Tu respuesta debe tener **exactamente** el siguiente formato textual, sin ningún texto adicional, caracteres especiales o JSON:
+        Tu respuesta debe tener **exactamente** el siguiente formato textual, sin ningún texto adicional. Asegúrate de que **NUEVA_INSTRUCCION** sea el primer campo y que **MOTIVO_EXPLICACION** lo siga inmediatamente.
+
         NUEVA_INSTRUCCION:"{nueva_instruccion}"
         MOTIVO_EXPLICACION:"{motivo_de_los_cambios}"
         """)
@@ -539,8 +541,8 @@ def fix_instructions_by_error():
             respuesta_fallida=reporte.failed_answer,
             sql_utilizado=reporte.sql_query if reporte.sql_query else "No se utilizó SQL.",
             esquema_tablas=esquema_tablas,
-            nueva_instruccion="", # Se eliminaron los placeholders del template
-            motivo_de_los_cambios="" # Se eliminaron los placeholders del template
+            nueva_instruccion="",
+            motivo_de_los_cambios=""
         )
         
         logger.info(f"DEBUG: Tamaño del prompt a enviar: %s caracteres.", len(llm_prompt))
@@ -563,12 +565,20 @@ def fix_instructions_by_error():
             logger.info(f"DEBUG: Respuesta del LLM recibida en {llm_latency:.2f} segundos.")
             llm_text_out = response_llm.choices[0].message.content
             logger.info(f"DEBUG: Respuesta cruda del LLM:\n{llm_text_out}")
-
-            nueva_instruccion_match = re.search(r'NUEVA_INSTRUCCION:"(.*?)"', llm_text_out, re.DOTALL)
+            
+            # --- Lógica de parsing con la nueva regex ---
+            nueva_instruccion_match = re.search(r'NUEVA_INSTRUCCION:"(.*?)"\s*MOTIVO_EXPLICACION:', llm_text_out, re.DOTALL)
             motivo_explicacion_match = re.search(r'MOTIVO_EXPLICACION:"(.*?)"', llm_text_out, re.DOTALL)
             
-            nueva_instruccion = nueva_instruccion_match.group(1) if nueva_instruccion_match else ""
-            motivo_explicacion = motivo_explicacion_match.group(1) if motivo_explicacion_match else ""
+            if nueva_instruccion_match:
+                nueva_instruccion = nueva_instruccion_match.group(1).strip()
+            else:
+                nueva_instruccion = ""
+            
+            if motivo_explicacion_match:
+                motivo_explicacion = motivo_explicacion_match.group(1).strip()
+            else:
+                motivo_explicacion = ""
 
         except APITimeoutError:
             error_msg = "La API de OpenAI excedió el tiempo de espera. Por favor, intenta de nuevo."
@@ -581,9 +591,9 @@ def fix_instructions_by_error():
             logger.error("ERROR: Error inesperado al procesar la respuesta del LLM: %s", str(e))
             return jsonify({"error": f"Error al procesar la respuesta de la IA: {str(e)}"}), 500
 
-        if not nueva_instruccion:
-            logger.error("ERROR: El LLM devolvió un formato incorrecto y no se pudo extraer la instrucción.")
-            return jsonify({"error": "El LLM no devolvió la nueva instrucción."}), 500
+        if not nueva_instruccion or not motivo_explicacion:
+            logger.error("ERROR: El LLM devolvió un formato incorrecto y no se pudo extraer la instrucción o el motivo.")
+            return jsonify({"error": "El LLM no devolvió los campos esperados."}), 500
 
         logger.info("DEBUG: Respuesta del LLM parseada con éxito.")
         reporte.resolved = True
@@ -600,7 +610,6 @@ def fix_instructions_by_error():
         db.session.rollback()
         logger.error("ERROR: Fallo inesperado en fix_instructions_by_error: %s", str(e))
         return jsonify({"error": f"Fallo inesperado: {str(e)}"}), 500
-
 #-------------------------------------------------
 
 
