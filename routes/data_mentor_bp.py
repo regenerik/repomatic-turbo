@@ -485,12 +485,14 @@ def fix_instructions_by_error():
     try:
         data = request.get_json()
         report_id = data.get("id")
+        user_comment = data.get("comentario", "")
 
         if not report_id:
             logger.error("ERROR: Falta el ID del reporte.")
             return jsonify({"error": "Falta el ID del reporte."}), 400
 
         logger.info(f"DEBUG: Procesando el reporte con ID: {report_id}")
+        logger.info(f"DEBUG: Comentario del usuario: '{user_comment}'")
 
         reporte = ReportesDataMentor.query.get(report_id)
         if not reporte:
@@ -522,6 +524,8 @@ def fix_instructions_by_error():
         Estructura de tablas:
         {esquema_tablas}
 
+        {comentario_usuario}
+
         Si las instrucciones actuales ya son adecuadas y el error no se debe a ellas, por favor devuélvelas sin cambios y explica por qué.
 
         Necesito que me contestes con el siguiente formato, sin texto adicional:
@@ -529,17 +533,21 @@ def fix_instructions_by_error():
         MOTIVO_EXPLICACION: "<el por qué de los cambios en 1-2 oraciones o el por qué no se cambió nada>"
         """)
 
+        comentario_placeholder = ""
+        if user_comment:
+            comentario_placeholder = f"Aclaración del usuario: '{user_comment}'"
+
         llm_prompt = prompt_template.format(
             instrucciones_actuales=instrucciones_actuales.instructions,
             pregunta_usuario=reporte.question,
             respuesta_fallida=reporte.failed_answer,
             sql_utilizado=reporte.sql_query if reporte.sql_query else "No se utilizó SQL.",
-            esquema_tablas=esquema_tablas
+            esquema_tablas=esquema_tablas,
+            comentario_usuario=comentario_placeholder
         )
         
         logger.info("DEBUG: Prompt para el LLM construido. Llamando a la API de OpenAI...")
 
-        # Aquí refactorizamos la llamada para usar kwargs y un timeout explícito
         messages = [
             {"role": "system", "content": "Eres un asistente experto en optimización de instrucciones para modelos de lenguaje. Tu única tarea es analizar un error y proponer una nueva instrucción mejorada. Si las instrucciones son correctas, devuélvelas sin cambios y explícame por qué."},
             {"role": "user", "content": llm_prompt}
@@ -548,7 +556,7 @@ def fix_instructions_by_error():
             "model": OPENAI_MODEL,
             "messages": messages,
             "response_format": {"type": "json_object"},
-            "timeout": 30.0  # Timeout en segundos para la solicitud
+            "timeout": 30.0
         }
 
         try:
