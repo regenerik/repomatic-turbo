@@ -548,7 +548,7 @@ def fix_instructions_by_error():
             "model": OPENAI_MODEL,
             "messages": messages,
             "response_format": {"type": "json_object"},
-            "timeout": 30.0  # Timeout en segundos para la solicitud
+            "timeout": 120.0  # Timeout en segundos para la solicitud
         }
 
         try:
