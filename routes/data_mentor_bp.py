@@ -441,6 +441,145 @@ def delete_instructions():
         return jsonify({"error": str(e)}), 500
 
 
+#TODOESTO ES PARA QUE FUNCIONE EL "REPARAR CON IA"
+
+TABLES_WHITELIST = [
+    'Usuarios_Por_Asignacion',
+    'Usuarios_Sin_ID',
+    'ValidaUsuarios',
+    'DetalleApies',
+    'AvanceCursada',
+    'DetallesDeCursos',
+    'CursadasAgrupadas',
+    'FormularioGestor',
+    'CuartoSurveySql',
+    'QuintoSurveySql',
+    'Comentarios2023',
+    'Comentarios2024',
+    'Comentarios2025',
+    'BaseLoopEstaciones',
+    'FichasGoogleCompetencia',
+    'FichasGoogle',
+    'SalesForce',
+    'ComentariosCompetencia',
+]
+
+def _table_summary(insp, table: str, max_cols: int | None = None) -> str:
+    """Helper para resumir columnas de una tabla."""
+    try:
+        cols = [c["name"] for c in insp.get_columns(table)]
+        if max_cols and len(cols) > max_cols:
+            head = ", ".join(cols[:max_cols])
+            return f"- {table}: columnas: {head}, … (+{len(cols)-max_cols} más)"
+        else:
+            return f"- {table}: columnas: {', '.join(cols) if cols else '(sin columnas detectadas)'}"
+    except Exception:
+        return f"- {table}: (no se pudieron listar columnas)"
+
+def build_db_schema_narrative(whitelist: List[str] | None = None, max_cols: int | None = None) -> str:
+    """Devuelve un texto plano con el listado de tablas y sus columnas."""
+    engine = db.engine
+    insp = inspect(engine)
+    tables = insp.get_table_names()
+    if whitelist:
+        tables = [t for t in tables if t in whitelist]
+
+    lines = ["Esquema (resumen narrativo):"]
+    for t in sorted(tables):
+        lines.append(_table_summary(insp, t, max_cols=max_cols))
+    return "\n".join(lines)
+
+@data_mentor_bp.route("/fix_instructions_by_error", methods=["POST"])
+def fix_instructions_by_error():
+    try:
+        data = request.get_json()
+        report_id = data.get("id")
+
+        if not report_id:
+            return jsonify({"error": "Falta el ID del reporte."}), 400
+
+        # 1. Obtener los datos del reporte de error
+        reporte = ReportesDataMentor.query.get(report_id)
+        if not reporte:
+            return jsonify({"error": "Reporte no encontrado."}), 404
+
+        # 2. Obtener las instrucciones más nuevas
+        instrucciones_actuales = Instructions.query.order_by(Instructions.created_at.desc()).first()
+        if not instrucciones_actuales:
+            return jsonify({"error": "No hay instrucciones de IA disponibles."}), 500
+
+        # 3. Obtener el esquema de las tablas
+        esquema_tablas = build_db_schema_narrative(whitelist=TABLES_WHITELIST)
+
+        # 4. Construir el super-prompt para el LLM
+        prompt_template = textwrap.dedent("""
+        Tengo un error en las instrucciones que le doy a mi flow para capturar sql de mi propia base de datos.
+        Las instrucciones actuales son las siguientes:
+        {instrucciones_actuales}
+
+        El error es que el usuario hizo una pregunta y la respuesta estaba equivocada. Te muestro la información:
+        Pregunta del usuario: "{pregunta_usuario}"
+        Respuesta fallida: "{respuesta_fallida}"
+        SQL utilizado: "{sql_utilizado}"
+
+        Para que entiendas, acá te dejo la estructura de mis tablas y sus columnas, para que veas si podes mejorar las instrucciones que te pasé al principio y así ese error no vuelva a ocurrir.
+        Estructura de tablas:
+        {esquema_tablas}
+
+        Necesito que me contestes con el siguiente formato, sin texto adicional:
+        NUEVA_INSTRUCCION:"<la nueva instrucción mejorada>"
+        MOTIVO_EXPLICACION: "<el por qué de los cambios en 1-2 oraciones>"
+        """)
+
+        llm_prompt = prompt_template.format(
+            instrucciones_actuales=instrucciones_actuales.instructions,
+            pregunta_usuario=reporte.question,
+            respuesta_fallida=reporte.failed_answer,
+            sql_utilizado=reporte.sql_query if reporte.sql_query else "No se utilizó SQL." ,
+            esquema_tablas=esquema_tablas
+        )
+
+        # 5. Llamar al LLM para obtener la respuesta
+        response_llm = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": "Eres un asistente experto en optimización de instrucciones para modelos de lenguaje. Tu única tarea es analizar un error y proponer una nueva instrucción mejorada."},
+                {"role": "user", "content": llm_prompt}
+            ],
+            response_format={"type": "json_object"}
+        )
+
+        llm_text_out = response_llm.choices[0].message.content
+
+        # 6. Parsear la respuesta del LLM (con regex)
+        nueva_instruccion_match = re.search(r'NUEVA_INSTRUCCION:\s*"(.*?)"', llm_text_out, re.DOTALL)
+        motivo_explicacion_match = re.search(r'MOTIVO_EXPLICACION:\s*"(.*?)"', llm_text_out, re.DOTALL)
+        
+        nueva_instruccion = nueva_instruccion_match.group(1) if nueva_instruccion_match else ""
+        motivo_explicacion = motivo_explicacion_match.group(1) if motivo_explicacion_match else ""
+
+        if not nueva_instruccion:
+             return jsonify({"error": "No se pudo extraer la nueva instrucción del LLM."}), 500
+
+        # 7. Opcional: Actualizar el reporte a "resuelto"
+        reporte.resolved = True
+        db.session.commit()
+
+        # 8. Devolver la nueva instrucción y el motivo al frontend
+        return jsonify({
+            "nueva_instruccion": nueva_instruccion,
+            "motivo_explicacion": motivo_explicacion
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+#-------------------------------------------------
+
+
+
+
 @data_mentor_bp.route("/close_chat_mentor", methods=["POST"])
 def close_chat():
     """
