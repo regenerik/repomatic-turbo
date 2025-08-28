@@ -1004,3 +1004,20 @@ class ReportesDataMentor(db.Model):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "modified_at": self.modified_at.isoformat() if self.modified_at else None,
         }
+    
+
+class Instructions(db.Model):
+    __tablename__ = 'instructions'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user = db.Column(db.String(255), nullable=False)
+    instructions = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def serialize(self):
+        return {
+            "id": self.id,
+            "user": self.user,
+            "instructions": self.instructions,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }

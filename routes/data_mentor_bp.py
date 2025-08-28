@@ -11,7 +11,7 @@ import urllib.request
 import urllib.error
 import json
 import pandas as pd
-from models import User, ReportesDataMentor ,Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas,FormularioGestor,CuartoSurveySql, QuintoSurveySql, Comentarios2023, Comentarios2024, Comentarios2025, BaseLoopEstaciones, FichasGoogleCompetencia, FichasGoogle, SalesForce, ComentariosCompetencia, FileDailyID
+from models import User,Instructions, ReportesDataMentor ,Usuarios_Por_Asignacion, Usuarios_Sin_ID, ValidaUsuarios,DetalleApies, AvanceCursada, DetallesDeCursos, CursadasAgrupadas,FormularioGestor,CuartoSurveySql, QuintoSurveySql, Comentarios2023, Comentarios2024, Comentarios2025, BaseLoopEstaciones, FichasGoogleCompetencia, FichasGoogle, SalesForce, ComentariosCompetencia, FileDailyID
 from sqlalchemy.exc import SQLAlchemyError
 import csv, textwrap
 import time
@@ -69,48 +69,61 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 Session = sessionmaker(bind=engine)
 
+#Obtener NARRATIVA DE DB o usar la que ya estaba
+def get_narrative_from_db():
+    """Obtiene el texto de la instrucción más reciente desde la base de datos."""
+    try:
+        latest_instruction = Instructions.query.order_by(Instructions.created_at.desc()).first()
+        if latest_instruction:
+            return latest_instruction.instructions
+        else:
+            # Texto básico por si la tabla está vacía
+            return textwrap.dedent("""
+            Guía corta de datos y relaciones (narrativa, NO JSON)
+
+            Idea general
+            - La tabla principal es base_loop_estaciones. Tiene info operativa, geográfica y administrativa de cada estación.
+            - Claves relevantes: "APIES" (identificador de estación, texto) y "Id" (otro identificador de estación).
+            - Si un nombre de columna tiene espacios o signos (p. ej., Estacion de Servicio: Zona, Store Code), citá con comillas dobles: "Store Code".
+            - Usá SQL ANSI. Strings con comillas simples. Identificadores con comillas dobles si tienen espacios.
+
+            Relaciones típicas (joins)
+            - base_loop_estaciones."APIES" = comentarios_encuesta_2023.apies
+            - base_loop_estaciones."APIES" = comentarios_encuesta_2024.apies
+            - base_loop_estaciones."APIES" = comentarios_encuesta_2025.apies
+
+            - base_loop_estaciones."Id" = fichas_google."Store Code"
+            - base_loop_estaciones."Id" = fichas_google_competencia.idLoop
+            - base_loop_estaciones."Id" = comentarios_competencia.IDLOOP
+            - base_loop_estaciones."Id" = usuarios_por_asignacion.id_pertenencia
+
+            - **NUEVA:** La tabla detalle_apies contiene información de negocio. Su columna 'apies' se vincula a:
+              - `usuarios_por_asignacion.id_pertenencia`
+              - `base_loop_estaciones."Apies"`
+
+            Aprendizaje / cursos (no todas tienen FK explícita, se relaciona por semántica):
+            - dni aparece en varias: avance_cursada.dni, cursadas_agrupadas.dni, usuarios_* (dni).
+            - id_curso en detalles_de_cursos.id_curso y cursadas_agrupadas.id_curso.
+            - avance_cursada tiene nombre_corto_curso / nombre_programa (texto) y puede cruzar con detalles_de_cursos por nombre o id si existe un mapping conocido.
+
+            Encuestas:
+            - cuarto_survey_sql y quinto_survey_sql: resultados de encuestas (campos texto con preguntas). Vinculaciones por curso/gestor/fechas si hace falta.
+            - comentarios_* (2023/2024/2025): comentarios de clientes por apies/fecha/sentiment.
+
+            Competencia:
+            - fichas_google_competencia e comentarios_competencia se enlazan a estaciones por idLoop ~ base_loop_estaciones."Id".
+            - fichas_google: nuestras fichas (reseñas, rating) por "Store Code" ~ base_loop_estaciones."Id".
+
+            Notas prácticas:
+            - Preferí SELECT de columnas concretas (no *).
+            - Si hay columnas con espacios, citá con "doble comilla".
+            - Si pedís muchos registros, agregá LIMIT <= 200.
+            """).strip()
+    except Exception as e:
+        # En caso de error de DB, usar el texto básico
+        return f"Error al cargar la narrativa desde la base de datos: {str(e)}"
 # ====== RELACIONES (NARRATIVA, SIN JSON) ======
-NARRATIVE_RELATIONS = textwrap.dedent("""
-Guía corta de datos y relaciones (narrativa, NO JSON)
-
-Idea general
-- La tabla principal es base_loop_estaciones. Tiene info operativa, geográfica y administrativa de cada estación.
-- Claves relevantes: "APIES" (identificador de estación, texto) y "Id" (otro identificador de estación).
-- Si un nombre de columna tiene espacios o signos (p. ej., Estacion de Servicio: Zona, Store Code), citá con comillas dobles: "Store Code".
-- Usá SQL ANSI. Strings con comillas simples. Identificadores con comillas dobles si tienen espacios.
-
-Relaciones típicas (joins)
-- base_loop_estaciones."APIES" = comentarios_encuesta_2023.apies
-- base_loop_estaciones."APIES" = comentarios_encuesta_2024.apies
-- base_loop_estaciones."APIES" = comentarios_encuesta_2025.apies
-
-- base_loop_estaciones."Id" = fichas_google."Store Code"
-- base_loop_estaciones."Id" = fichas_google_competencia.idLoop
-- base_loop_estaciones."Id" = comentarios_competencia.IDLOOP
-- base_loop_estaciones."Id" = usuarios_por_asignacion.id_pertenencia
-
-- **NUEVA:** La tabla detalle_apies contiene información de negocio. Su columna 'apies' se vincula a:
-  - `usuarios_por_asignacion.id_pertenencia`
-  - `base_loop_estaciones."Apies"`
-
-Aprendizaje / cursos (no todas tienen FK explícita, se relaciona por semántica):
-- dni aparece en varias: avance_cursada.dni, cursadas_agrupadas.dni, usuarios_* (dni).
-- id_curso en detalles_de_cursos.id_curso y cursadas_agrupadas.id_curso.
-- avance_cursada tiene nombre_corto_curso / nombre_programa (texto) y puede cruzar con detalles_de_cursos por nombre o id si existe un mapping conocido.
-
-Encuestas:
-- cuarto_survey_sql y quinto_survey_sql: resultados de encuestas (campos texto con preguntas). Vinculaciones por curso/gestor/fechas si hace falta.
-- comentarios_* (2023/2024/2025): comentarios de clientes por apies/fecha/sentiment.
-
-Competencia:
-- fichas_google_competencia e comentarios_competencia se enlazan a estaciones por idLoop ~ base_loop_estaciones."Id".
-- fichas_google: nuestras fichas (reseñas, rating) por "Store Code" ~ base_loop_estaciones."Id".
-
-Notas prácticas:
-- Preferí SELECT de columnas concretas (no *).
-- Si hay columnas con espacios, citá con "doble comilla".
-- Si pedís muchos registros, agregá LIMIT <= 200.
-""").strip()
+NARRATIVE_RELATIONS = get_narrative_from_db()
 
 # ====== Helpers: narrar el esquema sin JSON ======
 def _table_summary(insp, table: str, max_cols: int | None = None) -> str:
@@ -372,6 +385,61 @@ def get_reports_of_data_mentor():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@data_mentor_bp.route("/get_instructions", methods=["GET"])
+def get_instructions():
+    try:
+        # Obtener todas las instrucciones ordenadas por fecha de creación descendente
+        instructions = Instructions.query.order_by(Instructions.created_at.desc()).all()
+        serialized_instructions = [instr.serialize() for instr in instructions]
+        return jsonify(serialized_instructions), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@data_mentor_bp.route("/set_instructions", methods=["POST"])
+def set_instructions():
+    try:
+        data = request.json
+        instructions_text = data.get("instructions")
+        user_email = data.get("user")
+
+        if not instructions_text or not user_email:
+            return jsonify({"error": "Los campos 'instructions' y 'user' son requeridos."}), 400
+
+        # Crear un nuevo registro de instrucciones
+        new_instructions = Instructions(
+            user=user_email,
+            instructions=instructions_text
+        )
+        db.session.add(new_instructions)
+        db.session.commit()
+
+        return jsonify({"message": "Instrucciones guardadas exitosamente."}), 201
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+@data_mentor_bp.route("/delete_instructions", methods=["DELETE"])
+def delete_instructions():
+    try:
+        data = request.json
+        instruction_id = data.get("id")
+
+        if not instruction_id:
+            return jsonify({"error": "El campo 'id' es requerido."}), 400
+
+        instruction = Instructions.query.get(instruction_id)
+        if not instruction:
+            return jsonify({"error": "Registro de instrucciones no encontrado."}), 404
+
+        db.session.delete(instruction)
+        db.session.commit()
+
+        return jsonify({"message": f"Instrucción con ID {instruction_id} eliminada exitosamente."}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
 
 @data_mentor_bp.route("/close_chat_mentor", methods=["POST"])
 def close_chat():
