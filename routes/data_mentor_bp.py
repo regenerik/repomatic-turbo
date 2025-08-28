@@ -16,7 +16,7 @@ from sqlalchemy.exc import SQLAlchemyError
 import csv, textwrap
 import time
 import re
-from openai import OpenAI
+from openai import OpenAI, APIError
 from tempfile import NamedTemporaryFile
 import openpyxl
 from io import BytesIO
