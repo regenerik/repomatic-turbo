@@ -601,6 +601,36 @@ def fix_instructions_by_error():
 #-------------------------------------------------
 
 
+@data_mentor_bp.route("/switch_error_status", methods=["POST"])
+def switch_error_status():
+    try:
+        data = request.get_json()
+        report_id = data.get("id")
+
+        if not report_id:
+            logger.error("ERROR: Falta el ID del reporte en la solicitud.")
+            return jsonify({"error": "Falta el ID del reporte."}), 400
+
+        reporte = ReportesDataMentor.query.get(report_id)
+        if not reporte:
+            logger.error(f"ERROR: Reporte con ID {report_id} no encontrado.")
+            return jsonify({"error": "Reporte no encontrado."}), 404
+
+        # Cambiar el estado de resolved
+        reporte.resolved = not reporte.resolved
+        db.session.commit()
+
+        logger.info(f"DEBUG: El estado del reporte {report_id} se ha cambiado a {reporte.resolved}.")
+        return jsonify({
+            "message": "Estado del reporte actualizado con éxito.",
+            "new_status": reporte.resolved,
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"ERROR: Fallo inesperado al cambiar el estado del reporte: {str(e)}")
+        return jsonify({"error": f"Fallo inesperado: {str(e)}"}), 500
+
 
 
 @data_mentor_bp.route("/close_chat_mentor", methods=["POST"])
