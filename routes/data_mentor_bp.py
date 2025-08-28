@@ -444,28 +444,14 @@ def delete_instructions():
 #TODOESTO ES PARA QUE FUNCIONE EL "REPARAR CON IA"
 
 TABLES_WHITELIST = [
-    'Usuarios_Por_Asignacion',
-    'Usuarios_Sin_ID',
-    'ValidaUsuarios',
-    'DetalleApies',
-    'AvanceCursada',
-    'DetallesDeCursos',
-    'CursadasAgrupadas',
-    'FormularioGestor',
-    'CuartoSurveySql',
-    'QuintoSurveySql',
-    'Comentarios2023',
-    'Comentarios2024',
-    'Comentarios2025',
-    'BaseLoopEstaciones',
-    'FichasGoogleCompetencia',
-    'FichasGoogle',
-    'SalesForce',
-    'ComentariosCompetencia',
+    'Usuarios_Por_Asignacion', 'Usuarios_Sin_ID', 'ValidaUsuarios', 'DetalleApies',
+    'AvanceCursada', 'DetallesDeCursos', 'CursadasAgrupadas', 'FormularioGestor',
+    'CuartoSurveySql', 'QuintoSurveySql', 'Comentarios2023', 'Comentarios2024',
+    'Comentarios2025', 'BaseLoopEstaciones', 'FichasGoogleCompetencia',
+    'FichasGoogle', 'SalesForce', 'ComentariosCompetencia',
 ]
 
 def _table_summary(insp, table: str, max_cols: int | None = None) -> str:
-    """Helper para resumir columnas de una tabla."""
     try:
         cols = [c["name"] for c in insp.get_columns(table)]
         if max_cols and len(cols) > max_cols:
@@ -477,7 +463,6 @@ def _table_summary(insp, table: str, max_cols: int | None = None) -> str:
         return f"- {table}: (no se pudieron listar columnas)"
 
 def build_db_schema_narrative(whitelist: List[str] | None = None, max_cols: int | None = None) -> str:
-    """Devuelve un texto plano con el listado de tablas y sus columnas."""
     engine = db.engine
     insp = inspect(engine)
     tables = insp.get_table_names()
@@ -496,20 +481,30 @@ def fix_instructions_by_error():
         report_id = data.get("id")
 
         if not report_id:
+            print("ERROR: Falta el ID del reporte.")
             return jsonify({"error": "Falta el ID del reporte."}), 400
+
+        print(f"DEBUG: Procesando el reporte con ID: {report_id}")
 
         # 1. Obtener los datos del reporte de error
         reporte = ReportesDataMentor.query.get(report_id)
         if not reporte:
+            print(f"ERROR: Reporte con ID {report_id} no encontrado.")
             return jsonify({"error": "Reporte no encontrado."}), 404
+
+        print("DEBUG: Reporte encontrado. Obteniendo las instrucciones actuales...")
 
         # 2. Obtener las instrucciones más nuevas
         instrucciones_actuales = Instructions.query.order_by(Instructions.created_at.desc()).first()
         if not instrucciones_actuales:
+            print("ERROR: No hay instrucciones de IA disponibles.")
             return jsonify({"error": "No hay instrucciones de IA disponibles."}), 500
+
+        print("DEBUG: Instrucciones actuales encontradas. Obteniendo el esquema de tablas...")
 
         # 3. Obtener el esquema de las tablas
         esquema_tablas = build_db_schema_narrative(whitelist=TABLES_WHITELIST)
+        print("DEBUG: Esquema de tablas generado.")
 
         # 4. Construir el super-prompt para el LLM
         prompt_template = textwrap.dedent("""
@@ -526,46 +521,75 @@ def fix_instructions_by_error():
         Estructura de tablas:
         {esquema_tablas}
 
+        Si las instrucciones actuales ya son adecuadas y el error no se debe a ellas, por favor devuélvelas sin cambios y explica por qué.
+
         Necesito que me contestes con el siguiente formato, sin texto adicional:
-        NUEVA_INSTRUCCION:"<la nueva instrucción mejorada>"
-        MOTIVO_EXPLICACION: "<el por qué de los cambios en 1-2 oraciones>"
+        NUEVA_INSTRUCCION:"<la nueva instrucción mejorada o la misma si no hay cambios>"
+        MOTIVO_EXPLICACION: "<el por qué de los cambios en 1-2 oraciones o el por qué no se cambió nada>"
         """)
 
         llm_prompt = prompt_template.format(
             instrucciones_actuales=instrucciones_actuales.instructions,
             pregunta_usuario=reporte.question,
             respuesta_fallida=reporte.failed_answer,
-            sql_utilizado=reporte.sql_query if reporte.sql_query else "No se utilizó SQL." ,
+            sql_utilizado=reporte.sql_query if reporte.sql_query else "No se utilizó SQL.",
             esquema_tablas=esquema_tablas
         )
+        
+        print("DEBUG: Prompt para el LLM construido. Llamando a la API de OpenAI...")
 
         # 5. Llamar al LLM para obtener la respuesta
-        response_llm = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": "Eres un asistente experto en optimización de instrucciones para modelos de lenguaje. Tu única tarea es analizar un error y proponer una nueva instrucción mejorada."},
-                {"role": "user", "content": llm_prompt}
-            ],
-            response_format={"type": "json_object"}
-        )
+        t0 = time.time()
+        try:
+            response_llm = client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": "Eres un asistente experto en optimización de instrucciones para modelos de lenguaje. Tu única tarea es analizar un error y proponer una nueva instrucción mejorada. Si las instrucciones son correctas, devuélvelas sin cambios y explícame por qué."},
+                    {"role": "user", "content": llm_prompt}
+                ],
+                response_format={"type": "json_object"}
+            )
+            llm_latency = time.time() - t0
+            print(f"DEBUG: Respuesta del LLM recibida en {llm_latency:.2f} segundos.")
+            llm_text_out = response_llm.choices[0].message.content
+            print(f"DEBUG: Respuesta cruda del LLM:\n{llm_text_out}")
 
-        llm_text_out = response_llm.choices[0].message.content
-
-        # 6. Parsear la respuesta del LLM (con regex)
-        nueva_instruccion_match = re.search(r'NUEVA_INSTRUCCION:\s*"(.*?)"', llm_text_out, re.DOTALL)
-        motivo_explicacion_match = re.search(r'MOTIVO_EXPLICACION:\s*"(.*?)"', llm_text_out, re.DOTALL)
-        
-        nueva_instruccion = nueva_instruccion_match.group(1) if nueva_instruccion_match else ""
-        motivo_explicacion = motivo_explicacion_match.group(1) if motivo_explicacion_match else ""
+            # 6. Parsear la respuesta del LLM
+            response_json = json.loads(llm_text_out)
+            nueva_instruccion = response_json.get("NUEVA_INSTRUCCION", "")
+            motivo_explicacion = response_json.get("MOTIVO_EXPLICACION", "")
+        except APIError as api_error:
+            # Capturar errores específicos de la API de OpenAI (e.g., timeout, rate limit)
+            print(f"ERROR: Fallo de la API de OpenAI: {api_error.response.text}")
+            return jsonify({"error": f"Fallo de la API de OpenAI: {api_error.response.text}"}), 500
+        except json.JSONDecodeError as json_error:
+            # Capturar errores si la respuesta no es un JSON válido
+            print(f"ERROR: No se pudo decodificar la respuesta JSON del LLM: {json_error}")
+            print(f"Respuesta cruda del LLM: {llm_text_out}")
+            # Intento de extracción con regex como fallback
+            nueva_instruccion_match = re.search(r'NUEVA_INSTRUCCION:"(.*?)"', llm_text_out, re.DOTALL)
+            motivo_explicacion_match = re.search(r'MOTIVO_EXPLICACION:"(.*?)"', llm_text_out, re.DOTALL)
+            nueva_instruccion = nueva_instruccion_match.group(1) if nueva_instruccion_match else ""
+            motivo_explicacion = motivo_explicacion_match.group(1) if motivo_explicacion_match else ""
+            if not nueva_instruccion:
+                 return jsonify({"error": "No se pudo extraer la nueva instrucción del LLM."}), 500
+        except Exception as e:
+            print(f"ERROR: Error inesperado al procesar la respuesta del LLM: {str(e)}")
+            return jsonify({"error": f"Error al procesar la respuesta de la IA: {str(e)}"}), 500
 
         if not nueva_instruccion:
-             return jsonify({"error": "No se pudo extraer la nueva instrucción del LLM."}), 500
+            print("ERROR: El LLM devolvió un formato incorrecto y no se pudo extraer la instrucción.")
+            return jsonify({"error": "El LLM no devolvió la nueva instrucción."}), 500
+
+        print("DEBUG: Respuesta del LLM parseada con éxito.")
 
         # 7. Opcional: Actualizar el reporte a "resuelto"
         reporte.resolved = True
         db.session.commit()
+        print(f"DEBUG: Reporte {report_id} marcado como resuelto.")
 
         # 8. Devolver la nueva instrucción y el motivo al frontend
+        print("DEBUG: Enviando respuesta al frontend.")
         return jsonify({
             "nueva_instruccion": nueva_instruccion,
             "motivo_explicacion": motivo_explicacion
@@ -573,7 +597,9 @@ def fix_instructions_by_error():
 
     except Exception as e:
         db.session.rollback()
-        return jsonify({"error": str(e)}), 500
+        # Esto es crucial: asegura que el error real se registre y se devuelva
+        print(f"ERROR: Fallo inesperado en fix_instructions_by_error: {str(e)}")
+        return jsonify({"error": f"Fallo inesperado: {str(e)}"}), 500
 
 #-------------------------------------------------
 
