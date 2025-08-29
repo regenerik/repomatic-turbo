@@ -13,6 +13,7 @@ from io import BytesIO
 from openai import OpenAI
 import json
 from sqlalchemy import text
+from datetime import datetime, date
 
 
 
@@ -452,7 +453,7 @@ def get_buckup():
         from datetime import datetime
         backup_filename = f"backup_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.json"
         
-        with open(backup_filename, 'w') as f:
+        with open(backup_filename, 'w', encoding='utf-8') as f:
             json.dump(backup_data, f, indent=4, ensure_ascii=False)
         
         # Enviar el archivo como respuesta
@@ -488,6 +489,23 @@ def restaurar_db():
         # Restaurar los datos
         def restore_table(model, data):
             for item_data in data:
+                # La clave 'id' se autogenera, por lo que la eliminamos si existe
+                if 'id' in item_data:
+                    del item_data['id']
+                if 'dni' in item_data and item_data['dni'] is None:
+                    del item_data['dni']
+                
+                # Conversión de strings a objetos de Python
+                for key, value in item_data.items():
+                    if isinstance(value, str):
+                        try:
+                            item_data[key] = datetime.fromisoformat(value)
+                        except (ValueError, TypeError):
+                            try:
+                                item_data[key] = date.fromisoformat(value)
+                            except (ValueError, TypeError):
+                                pass
+
                 new_item = model(**item_data)
                 db.session.add(new_item)
         
