@@ -1,7 +1,7 @@
 from flask import Blueprint, send_file, make_response, request, jsonify, render_template, current_app, Response # Blueprint para modularizar y relacionar con app
 from flask_bcrypt import Bcrypt                                  # Bcrypt para encriptación
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity   # Jwt para tokens
-from models import User, TotalComents                            # importar tabla "User" de models
+from models import User, TotalComents, Instructions, ReportesDataMentor, HistoryUserCourses, FormularioGestor                     # importar tabla "User" de models
 from database import db                                          # importa la db desde database.py
 from datetime import timedelta                                   # importa tiempo especifico para rendimiento de token válido
 from logging_config import logger
@@ -11,6 +11,8 @@ load_dotenv()
 import pandas as pd
 from io import BytesIO
 from openai import OpenAI
+import json
+from sqlalchemy import text
 
 
 
@@ -430,3 +432,74 @@ def check_token():
     devolviendo un status 401.
     """
     return jsonify({"message": "Token is valid", "status": "success"}), 200
+
+
+RESTORE_DB_KEY = os.getenv("RESTORE_DB_KEY")
+
+@admin_bp.route("/get_buckup", methods=["GET"])
+def get_buckup():
+    try:
+        # Serializar los datos de todas las tablas
+        backup_data = {
+            "Instructions": [item.serialize() for item in Instructions.query.all()],
+            "User": [item.serialize() for item in User.query.all()],
+            "ReportesDataMentor": [item.serialize() for item in ReportesDataMentor.query.all()],
+            "HistoryUserCourses": [item.serialize() for item in HistoryUserCourses.query.all()],
+            "FormularioGestor": [item.serialize() for item in FormularioGestor.query.all()],
+        }
+
+        # Guardar el JSON en un archivo temporal
+        from datetime import datetime
+        backup_filename = f"backup_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.json"
+        
+        with open(backup_filename, 'w') as f:
+            json.dump(backup_data, f, indent=4, ensure_ascii=False)
+        
+        # Enviar el archivo como respuesta
+        return send_file(backup_filename, as_attachment=True, mimetype='application/json', download_name=backup_filename)
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": f"Error al generar el backup: {str(e)}"}), 500
+
+@admin_bp.route("/restaurar_db", methods=["POST"])
+def restaurar_db():
+    try:
+        # Validar la clave secreta
+        password = request.form.get("password")
+        if password != RESTORE_DB_KEY:
+            return jsonify({"error": "Clave de restauración incorrecta."}), 401
+        
+        # Leer el archivo del FormData
+        file = request.files.get("file")
+        if not file:
+            return jsonify({"error": "No se recibió ningún archivo."}), 400
+        
+        # Cargar los datos del JSON
+        backup_data = json.load(file)
+
+        # Truncar las tablas existentes
+        db.session.execute(text("TRUNCATE TABLE instructions RESTART IDENTITY CASCADE;"))
+        db.session.execute(text("TRUNCATE TABLE user RESTART IDENTITY CASCADE;"))
+        db.session.execute(text("TRUNCATE TABLE reportes_data_mentor RESTART IDENTITY CASCADE;"))
+        db.session.execute(text("TRUNCATE TABLE history_user_courses RESTART IDENTITY CASCADE;"))
+        db.session.execute(text("TRUNCATE TABLE formulario_gestor RESTART IDENTITY CASCADE;"))
+
+        # Restaurar los datos
+        def restore_table(model, data):
+            for item_data in data:
+                new_item = model(**item_data)
+                db.session.add(new_item)
+        
+        restore_table(Instructions, backup_data.get("Instructions", []))
+        restore_table(User, backup_data.get("User", []))
+        restore_table(ReportesDataMentor, backup_data.get("ReportesDataMentor", []))
+        restore_table(HistoryUserCourses, backup_data.get("HistoryUserCourses", []))
+        restore_table(FormularioGestor, backup_data.get("FormularioGestor", []))
+
+        db.session.commit()
+        return jsonify({"message": "Base de datos restaurada con éxito."}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": f"Error al restaurar la base de datos: {str(e)}"}), 500
