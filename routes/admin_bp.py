@@ -14,6 +14,7 @@ from openai import OpenAI
 import json
 from sqlalchemy import text
 from datetime import datetime, date
+import tempfile
 
 
 
@@ -453,11 +454,16 @@ def get_buckup():
         from datetime import datetime
         backup_filename = f"backup_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.json"
         
-        with open(backup_filename, 'w', encoding='utf-8') as f:
-            json.dump(backup_data, f, indent=4, ensure_ascii=False)
+        # Usar un archivo temporal gestionado por el sistema operativo
+        with tempfile.NamedTemporaryFile(mode='w+', delete=False, encoding='utf-8') as temp_file:
+            json.dump(backup_data, temp_file, indent=4, ensure_ascii=False)
+            temp_file_path = temp_file.name
         
-        # Enviar el archivo como respuesta
-        return send_file(backup_filename, as_attachment=True, mimetype='application/json', download_name=backup_filename)
+        # Enviar el archivo como respuesta y luego eliminar el archivo temporal
+        try:
+            return send_file(temp_file_path, as_attachment=True, mimetype='application/json', download_name=backup_filename)
+        finally:
+            os.remove(temp_file_path)
 
     except Exception as e:
         db.session.rollback()
@@ -466,36 +472,29 @@ def get_buckup():
 @admin_bp.route("/restaurar_db", methods=["POST"])
 def restaurar_db():
     try:
-        # Validar la clave secreta
         password = request.form.get("password")
         if password != RESTORE_DB_KEY:
             return jsonify({"error": "Clave de restauración incorrecta."}), 401
         
-        # Leer el archivo del FormData
         file = request.files.get("file")
         if not file:
             return jsonify({"error": "No se recibió ningún archivo."}), 400
         
-        # Cargar los datos del JSON
         backup_data = json.load(file)
 
-        # Truncar las tablas existentes
         db.session.execute(text("TRUNCATE TABLE instructions RESTART IDENTITY CASCADE;"))
         db.session.execute(text("TRUNCATE TABLE user RESTART IDENTITY CASCADE;"))
         db.session.execute(text("TRUNCATE TABLE reportes_data_mentor RESTART IDENTITY CASCADE;"))
         db.session.execute(text("TRUNCATE TABLE history_user_courses RESTART IDENTITY CASCADE;"))
         db.session.execute(text("TRUNCATE TABLE formulario_gestor RESTART IDENTITY CASCADE;"))
 
-        # Restaurar los datos
         def restore_table(model, data):
             for item_data in data:
-                # La clave 'id' se autogenera, por lo que la eliminamos si existe
                 if 'id' in item_data:
                     del item_data['id']
                 if 'dni' in item_data and item_data['dni'] is None:
                     del item_data['dni']
                 
-                # Conversión de strings a objetos de Python
                 for key, value in item_data.items():
                     if isinstance(value, str):
                         try:
