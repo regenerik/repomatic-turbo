@@ -442,23 +442,59 @@ RESTORE_DB_KEY = os.getenv("RESTORE_DB_KEY")
 def get_buckup():
     logger.info("DEBUG: Iniciando el proceso de backup.")
     try:
-        # Serializar los datos de las tablas
+        # Serializar los datos de las tablas que tienen el método serialize()
         backup_data = {
             "Instructions": [item.serialize() for item in Instructions.query.all()],
-            "User": [item.serialize() for item in User.query.all()],
             "ReportesDataMentor": [item.serialize() for item in ReportesDataMentor.query.all()],
             "HistoryUserCourses": [item.serialize() for item in HistoryUserCourses.query.all()],
-            "FormularioGestor": []
+            "User": [],  # Serialización manual
+            "FormularioGestor": []  # Serialización manual
         }
-        logger.info("DEBUG: Datos de tablas principales serializados. Procesando FormularioGestor...")
+        logger.info("DEBUG: Datos de tablas con .serialize() serializados.")
 
-        # Serialización manual de FormularioGestor para excluir la columna binaria
-        for item in FormularioGestor.query.all():
-            serialized_item = item.serialize()
-            if 'firma_file' in serialized_item:
-                del serialized_item['firma_file']
-            backup_data["FormularioGestor"].append(serialized_item)
-        logger.info("DEBUG: Serialización de FormularioGestor completada.")
+        # Serialización manual de la tabla User (sin método .serialize())
+        for user_obj in User.query.all():
+            backup_data["User"].append({
+                "id": user_obj.id,
+                "dni": user_obj.dni,
+                "name": user_obj.name,
+                "email": user_obj.email,
+                "password": user_obj.password,
+                "url_image": user_obj.url_image,
+                "admin": user_obj.admin,
+                "status": user_obj.status,
+            })
+        logger.info("DEBUG: Serialización de User completada.")
+        
+        # Serialización manual de FormularioGestor (excluyendo datos binarios)
+        for fg_obj in FormularioGestor.query.all():
+            backup_data["FormularioGestor"].append({
+                "id": fg_obj.id,
+                "apies": fg_obj.apies,
+                "curso": fg_obj.curso,
+                "fecha_usuario": fg_obj.fecha_usuario.isoformat() if fg_obj.fecha_usuario else None,
+                "gestor": fg_obj.gestor,
+                "duracion_horas": fg_obj.duracion_horas,
+                "objetivo": fg_obj.objetivo,
+                "contenido_desarrollado": fg_obj.contenido_desarrollado,
+                "ausentes": fg_obj.ausentes,
+                "presentes": fg_obj.presentes,
+                "resultados_logros": fg_obj.resultados_logros,
+                "compromiso": fg_obj.compromiso,
+                "participacion_actividades": fg_obj.participacion_actividades,
+                "concentracion": fg_obj.concentracion,
+                "cansancio": fg_obj.cansancio,
+                "interes_temas": fg_obj.interes_temas,
+                "recomendaciones": fg_obj.recomendaciones,
+                "otros_aspectos": fg_obj.otros_aspectos,
+                "jornada": fg_obj.jornada,
+                "dotacion_real_estacion": fg_obj.dotacion_real_estacion,
+                "dotacion_dni_faltantes": fg_obj.dotacion_dni_faltantes,
+                "nombre_firma": fg_obj.nombre_firma,
+                "email_gestor": fg_obj.email_gestor,
+                "creado_en": fg_obj.creado_en.isoformat() if fg_obj.creado_en else None
+            })
+        logger.info("DEBUG: Serialización de FormularioGestor completada (firma_file excluida).")
 
         # Guardar el JSON en un archivo temporal
         backup_filename = f"backup_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.json"
@@ -533,6 +569,14 @@ def restaurar_db():
                                 item_data[key] = date.fromisoformat(value)
                             except (ValueError, TypeError):
                                 pass
+                
+                # La tabla User usa 'dni' como PK, por lo que eliminamos 'id' si está presente
+                if model.__tablename__ == 'user' and 'id' in item_data:
+                    del item_data['id']
+
+                # En FormularioGestor se debe excluir el campo de firma si existiera
+                if model.__tablename__ == 'formulario_gestor' and 'firma_file' in item_data:
+                    del item_data['firma_file']
 
                 new_item = model(**item_data)
                 db.session.add(new_item)
@@ -555,4 +599,4 @@ def restaurar_db():
     except Exception as e:
         logger.error(f"ERROR: Fallo inesperado en restaurar_db: {str(e)}")
         db.session.rollback()
-        return jsonify({"error": f"Error al restaurar la base de datos: {str(e)}"}), 500
+        return jsonify({"error": f"Fallo inesperado: {str(e)}"}), 500
