@@ -524,9 +524,9 @@ def get_buckup():
 def restaurar_db():
     logger.info("DEBUG: Iniciando el proceso de restauración.")
     try:
-        # Validar la clave secreta
+        # Validar la clave secreta, usando .strip() para evitar errores de espacios
         password = request.form.get("password")
-        if password != RESTORE_DB_KEY:
+        if password.strip() != RESTORE_DB_KEY:
             logger.error("ERROR: Clave de restauración incorrecta.")
             return jsonify({"error": "Clave de restauración incorrecta."}), 401
         logger.info("DEBUG: Clave de restauración validada.")
@@ -569,14 +569,6 @@ def restaurar_db():
                                 item_data[key] = date.fromisoformat(value)
                             except (ValueError, TypeError):
                                 pass
-                
-                # La tabla User usa 'dni' como PK, por lo que eliminamos 'id' si está presente
-                if model.__tablename__ == 'user' and 'id' in item_data:
-                    del item_data['id']
-
-                # En FormularioGestor se debe excluir el campo de firma si existiera
-                if model.__tablename__ == 'formulario_gestor' and 'firma_file' in item_data:
-                    del item_data['firma_file']
 
                 new_item = model(**item_data)
                 db.session.add(new_item)
@@ -600,5 +592,3 @@ def restaurar_db():
         logger.error(f"ERROR: Fallo inesperado en restaurar_db: {str(e)}")
         db.session.rollback()
         return jsonify({"error": f"Fallo inesperado: {str(e)}"}), 500
-    
-    
