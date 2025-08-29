@@ -600,3 +600,5 @@ def restaurar_db():
         logger.error(f"ERROR: Fallo inesperado en restaurar_db: {str(e)}")
         db.session.rollback()
         return jsonify({"error": f"Fallo inesperado: {str(e)}"}), 500
+    
+    
