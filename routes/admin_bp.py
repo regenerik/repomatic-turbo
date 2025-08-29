@@ -524,25 +524,27 @@ def get_buckup():
 def restaurar_db():
     logger.info("DEBUG: Iniciando el proceso de restauración.")
     try:
-        # Validar la clave secreta, usando .strip() para evitar errores de espacios
+        # Validar la clave secreta
         password = request.form.get("password")
-        if password.strip() != RESTORE_DB_KEY:
-            logger.error("ERROR: Clave de restauración incorrecta.")
+        
+        # --- CAMBIO AQUÍ ---
+        # Verificamos si la clave existe antes de intentar usar .strip()
+        if not password or password.strip() != RESTORE_DB_KEY:
+            logger.error("ERROR: Clave de restauración incorrecta o no proporcionada.")
             return jsonify({"error": "Clave de restauración incorrecta."}), 401
+        
         logger.info("DEBUG: Clave de restauración validada.")
         
-        # Leer el archivo del FormData
+        # El resto del código se mantiene igual, ya que la lógica de restauración es robusta
         file = request.files.get("file")
         if not file:
             logger.error("ERROR: No se recibió ningún archivo.")
             return jsonify({"error": "No se recibió ningún archivo."}), 400
         logger.info("DEBUG: Archivo recibido. Cargando datos...")
         
-        # Cargar los datos del JSON
         backup_data = json.load(file)
         logger.info("DEBUG: Datos del backup cargados con éxito. Iniciando TRUNCATE de tablas.")
 
-        # Truncar las tablas existentes
         db.session.execute(text("TRUNCATE TABLE instructions RESTART IDENTITY CASCADE;"))
         db.session.execute(text("TRUNCATE TABLE user RESTART IDENTITY CASCADE;"))
         db.session.execute(text("TRUNCATE TABLE reportes_data_mentor RESTART IDENTITY CASCADE;"))
@@ -550,16 +552,13 @@ def restaurar_db():
         db.session.execute(text("TRUNCATE TABLE formulario_gestor RESTART IDENTITY CASCADE;"))
         logger.info("DEBUG: Tablas truncadas. Iniciando restauración de datos.")
 
-        # Restaurar los datos
         def restore_table(model, data):
             for item_data in data:
-                # La clave 'id' se autogenera, por lo que la eliminamos si existe
                 if 'id' in item_data:
                     del item_data['id']
                 if 'dni' in item_data and item_data['dni'] is None:
                     del item_data['dni']
                 
-                # Conversión de strings a objetos de Python
                 for key, value in item_data.items():
                     if isinstance(value, str):
                         try:
