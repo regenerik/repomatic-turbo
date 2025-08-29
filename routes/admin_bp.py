@@ -440,61 +440,90 @@ RESTORE_DB_KEY = os.getenv("RESTORE_DB_KEY")
 
 @admin_bp.route("/get_buckup", methods=["GET"])
 def get_buckup():
+    logger.info("DEBUG: Iniciando el proceso de backup.")
     try:
-        # Serializar los datos de todas las tablas
+        # Serializar los datos de las tablas
         backup_data = {
             "Instructions": [item.serialize() for item in Instructions.query.all()],
             "User": [item.serialize() for item in User.query.all()],
             "ReportesDataMentor": [item.serialize() for item in ReportesDataMentor.query.all()],
             "HistoryUserCourses": [item.serialize() for item in HistoryUserCourses.query.all()],
-            "FormularioGestor": [item.serialize() for item in FormularioGestor.query.all()],
+            "FormularioGestor": []
         }
+        logger.info("DEBUG: Datos de tablas principales serializados. Procesando FormularioGestor...")
+
+        # Serialización manual de FormularioGestor para excluir la columna binaria
+        for item in FormularioGestor.query.all():
+            serialized_item = item.serialize()
+            if 'firma_file' in serialized_item:
+                del serialized_item['firma_file']
+            backup_data["FormularioGestor"].append(serialized_item)
+        logger.info("DEBUG: Serialización de FormularioGestor completada.")
 
         # Guardar el JSON en un archivo temporal
-        from datetime import datetime
         backup_filename = f"backup_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.json"
+        temp_file_path = None
         
-        # Usar un archivo temporal gestionado por el sistema operativo
-        with tempfile.NamedTemporaryFile(mode='w+', delete=False, encoding='utf-8') as temp_file:
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, encoding='utf-8') as temp_file:
             json.dump(backup_data, temp_file, indent=4, ensure_ascii=False)
             temp_file_path = temp_file.name
         
-        # Enviar el archivo como respuesta y luego eliminar el archivo temporal
+        logger.info(f"DEBUG: Archivo temporal creado en: {temp_file_path}")
+
+        # Enviar el archivo como respuesta
         try:
-            return send_file(temp_file_path, as_attachment=True, mimetype='application/json', download_name=backup_filename)
+            response = send_file(temp_file_path, as_attachment=True, mimetype='application/json', download_name=backup_filename)
+            logger.info("DEBUG: Archivo enviado al cliente.")
+            return response
         finally:
             os.remove(temp_file_path)
+            logger.info(f"DEBUG: Archivo temporal {temp_file_path} eliminado.")
 
     except Exception as e:
+        logger.error(f"ERROR: Fallo inesperado en get_buckup: {str(e)}")
         db.session.rollback()
         return jsonify({"error": f"Error al generar el backup: {str(e)}"}), 500
 
 @admin_bp.route("/restaurar_db", methods=["POST"])
 def restaurar_db():
+    logger.info("DEBUG: Iniciando el proceso de restauración.")
     try:
+        # Validar la clave secreta
         password = request.form.get("password")
         if password != RESTORE_DB_KEY:
+            logger.error("ERROR: Clave de restauración incorrecta.")
             return jsonify({"error": "Clave de restauración incorrecta."}), 401
+        logger.info("DEBUG: Clave de restauración validada.")
         
+        # Leer el archivo del FormData
         file = request.files.get("file")
         if not file:
+            logger.error("ERROR: No se recibió ningún archivo.")
             return jsonify({"error": "No se recibió ningún archivo."}), 400
+        logger.info("DEBUG: Archivo recibido. Cargando datos...")
         
+        # Cargar los datos del JSON
         backup_data = json.load(file)
+        logger.info("DEBUG: Datos del backup cargados con éxito. Iniciando TRUNCATE de tablas.")
 
+        # Truncar las tablas existentes
         db.session.execute(text("TRUNCATE TABLE instructions RESTART IDENTITY CASCADE;"))
         db.session.execute(text("TRUNCATE TABLE user RESTART IDENTITY CASCADE;"))
         db.session.execute(text("TRUNCATE TABLE reportes_data_mentor RESTART IDENTITY CASCADE;"))
         db.session.execute(text("TRUNCATE TABLE history_user_courses RESTART IDENTITY CASCADE;"))
         db.session.execute(text("TRUNCATE TABLE formulario_gestor RESTART IDENTITY CASCADE;"))
+        logger.info("DEBUG: Tablas truncadas. Iniciando restauración de datos.")
 
+        # Restaurar los datos
         def restore_table(model, data):
             for item_data in data:
+                # La clave 'id' se autogenera, por lo que la eliminamos si existe
                 if 'id' in item_data:
                     del item_data['id']
                 if 'dni' in item_data and item_data['dni'] is None:
                     del item_data['dni']
                 
+                # Conversión de strings a objetos de Python
                 for key, value in item_data.items():
                     if isinstance(value, str):
                         try:
@@ -509,14 +538,21 @@ def restaurar_db():
                 db.session.add(new_item)
         
         restore_table(Instructions, backup_data.get("Instructions", []))
+        logger.info("DEBUG: Tabla Instructions restaurada.")
         restore_table(User, backup_data.get("User", []))
+        logger.info("DEBUG: Tabla User restaurada.")
         restore_table(ReportesDataMentor, backup_data.get("ReportesDataMentor", []))
+        logger.info("DEBUG: Tabla ReportesDataMentor restaurada.")
         restore_table(HistoryUserCourses, backup_data.get("HistoryUserCourses", []))
+        logger.info("DEBUG: Tabla HistoryUserCourses restaurada.")
         restore_table(FormularioGestor, backup_data.get("FormularioGestor", []))
+        logger.info("DEBUG: Tabla FormularioGestor restaurada.")
 
         db.session.commit()
+        logger.info("DEBUG: Commit a la base de datos realizado. Proceso completado.")
         return jsonify({"message": "Base de datos restaurada con éxito."}), 200
 
     except Exception as e:
+        logger.error(f"ERROR: Fallo inesperado en restaurar_db: {str(e)}")
         db.session.rollback()
         return jsonify({"error": f"Error al restaurar la base de datos: {str(e)}"}), 500
