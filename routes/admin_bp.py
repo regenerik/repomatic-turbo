@@ -19,6 +19,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 
 
+
 admin_bp = Blueprint('admin', __name__)     # instanciar admin_bp desde clase Blueprint para crear las rutas.
 bcrypt = Bcrypt()
 jwt = JWTManager()
