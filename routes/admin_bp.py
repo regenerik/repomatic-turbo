@@ -526,34 +526,46 @@ def restaurar_db():
     try:
         # Validar la clave secreta
         password = request.form.get("password")
-        
-        # --- CAMBIO AQUÍ ---
-        # Verificamos si la clave existe antes de intentar usar .strip()
         if not password or password.strip() != RESTORE_DB_KEY:
             logger.error("ERROR: Clave de restauración incorrecta o no proporcionada.")
             return jsonify({"error": "Clave de restauración incorrecta."}), 401
         
         logger.info("DEBUG: Clave de restauración validada.")
         
-        # El resto del código se mantiene igual, ya que la lógica de restauración es robusta
         file = request.files.get("file")
         if not file:
             logger.error("ERROR: No se recibió ningún archivo.")
             return jsonify({"error": "No se recibió ningún archivo."}), 400
+        
         logger.info("DEBUG: Archivo recibido. Cargando datos...")
         
         backup_data = json.load(file)
-        logger.info("DEBUG: Datos del backup cargados con éxito. Iniciando TRUNCATE de tablas.")
+        logger.info("DEBUG: Datos del backup cargados con éxito. Vaciando tablas.")
 
-        db.session.execute(text("TRUNCATE TABLE instructions RESTART IDENTITY CASCADE;"))
-        db.session.execute(text("TRUNCATE TABLE user RESTART IDENTITY CASCADE;"))
-        db.session.execute(text("TRUNCATE TABLE reportes_data_mentor RESTART IDENTITY CASCADE;"))
-        db.session.execute(text("TRUNCATE TABLE history_user_courses RESTART IDENTITY CASCADE;"))
-        db.session.execute(text("TRUNCATE TABLE formulario_gestor RESTART IDENTITY CASCADE;"))
-        logger.info("DEBUG: Tablas truncadas. Iniciando restauración de datos.")
+        # Reemplazamos TRUNCATE con DELETE FROM y reiniciamos la secuencia
+        # para que los IDs auto-incrementales comiencen desde 1 nuevamente.
+        db.session.execute(text("DELETE FROM instructions"))
+        db.session.execute(text("DELETE FROM sqlite_sequence WHERE name='instructions';"))
+        
+        db.session.execute(text("DELETE FROM user"))
+        db.session.execute(text("DELETE FROM sqlite_sequence WHERE name='user';"))
+        
+        db.session.execute(text("DELETE FROM reportes_data_mentor"))
+        db.session.execute(text("DELETE FROM sqlite_sequence WHERE name='reportes_data_mentor';"))
+        
+        db.session.execute(text("DELETE FROM history_user_courses"))
+        db.session.execute(text("DELETE FROM sqlite_sequence WHERE name='history_user_courses';"))
+        
+        db.session.execute(text("DELETE FROM formulario_gestor"))
+        db.session.execute(text("DELETE FROM sqlite_sequence WHERE name='formulario_gestor';"))
 
+        db.session.commit()
+        logger.info("DEBUG: Tablas vaciadas. Iniciando restauración de datos.")
+        
         def restore_table(model, data):
             for item_data in data:
+                # La lógica de restauración se mantiene igual
+                # ... tu código actual aquí ...
                 if 'id' in item_data:
                     del item_data['id']
                 if 'dni' in item_data and item_data['dni'] is None:
