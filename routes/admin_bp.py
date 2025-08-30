@@ -524,7 +524,7 @@ def get_buckup():
 def restaurar_db():
     logger.info("DEBUG: Iniciando el proceso de restauración.")
     try:
-        # Validar la clave secreta
+        # 1. Validar la clave secreta
         password = request.form.get("password")
         if not password or password.strip() != RESTORE_DB_KEY:
             logger.error("ERROR: Clave de restauración incorrecta o no proporcionada.")
@@ -532,58 +532,50 @@ def restaurar_db():
         
         logger.info("DEBUG: Clave de restauración validada.")
         
+        # 2. Recibir y cargar el archivo de backup
         file = request.files.get("file")
         if not file:
             logger.error("ERROR: No se recibió ningún archivo.")
             return jsonify({"error": "No se recibió ningún archivo."}), 400
         
         logger.info("DEBUG: Archivo recibido. Cargando datos...")
-        
         backup_data = json.load(file)
         logger.info("DEBUG: Datos del backup cargados con éxito. Vaciando tablas.")
 
-        # Reemplazamos TRUNCATE con DELETE FROM y reiniciamos la secuencia
-        # para que los IDs auto-incrementales comiencen desde 1 nuevamente.
+        # 3. Vaciar las tablas existentes para evitar conflictos de IDs
+        # Usamos DELETE FROM para eliminar todas las filas. NO reiniciamos la secuencia.
         db.session.execute(text("DELETE FROM instructions"))
-        db.session.execute(text("DELETE FROM sqlite_sequence WHERE name='instructions';"))
-        
         db.session.execute(text("DELETE FROM user"))
-        db.session.execute(text("DELETE FROM sqlite_sequence WHERE name='user';"))
-        
         db.session.execute(text("DELETE FROM reportes_data_mentor"))
-        db.session.execute(text("DELETE FROM sqlite_sequence WHERE name='reportes_data_mentor';"))
-        
         db.session.execute(text("DELETE FROM history_user_courses"))
-        db.session.execute(text("DELETE FROM sqlite_sequence WHERE name='history_user_courses';"))
-        
         db.session.execute(text("DELETE FROM formulario_gestor"))
-        db.session.execute(text("DELETE FROM sqlite_sequence WHERE name='formulario_gestor';"))
-
-        db.session.commit()
-        logger.info("DEBUG: Tablas vaciadas. Iniciando restauración de datos.")
         
+        db.session.commit()
+        logger.info("DEBUG: Tablas vaciadas. Iniciando restauración de datos con IDs originales.")
+
+        # 4. Función genérica para restaurar datos con IDs originales
         def restore_table(model, data):
             for item_data in data:
-                # La lógica de restauración se mantiene igual
-                # ... tu código actual aquí ...
-                if 'id' in item_data:
-                    del item_data['id']
-                if 'dni' in item_data and item_data['dni'] is None:
-                    del item_data['dni']
+                # Se mantiene el 'id' en los datos
                 
+                # Manejar fechas
                 for key, value in item_data.items():
                     if isinstance(value, str):
                         try:
+                            # Intenta convertir la cadena a datetime
                             item_data[key] = datetime.fromisoformat(value)
                         except (ValueError, TypeError):
                             try:
+                                # Si falla, intenta convertir a date
                                 item_data[key] = date.fromisoformat(value)
                             except (ValueError, TypeError):
                                 pass
 
+                # Se crea la nueva instancia con todos los datos, incluyendo el ID
                 new_item = model(**item_data)
                 db.session.add(new_item)
-        
+                
+        # 5. Restaurar cada tabla
         restore_table(Instructions, backup_data.get("Instructions", []))
         logger.info("DEBUG: Tabla Instructions restaurada.")
         restore_table(User, backup_data.get("User", []))
@@ -595,9 +587,15 @@ def restaurar_db():
         restore_table(FormularioGestor, backup_data.get("FormularioGestor", []))
         logger.info("DEBUG: Tabla FormularioGestor restaurada.")
 
+        # 6. Commit de la sesión
         db.session.commit()
         logger.info("DEBUG: Commit a la base de datos realizado. Proceso completado.")
         return jsonify({"message": "Base de datos restaurada con éxito."}), 200
+
+    except SQLAlchemyError as e:
+        logger.error(f"ERROR: Fallo de SQLAlchemy durante la restauración: {str(e)}")
+        db.session.rollback()
+        return jsonify({"error": f"Fallo de la base de datos: {str(e)}"}), 500
 
     except Exception as e:
         logger.error(f"ERROR: Fallo inesperado en restaurar_db: {str(e)}")
