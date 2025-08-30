@@ -15,6 +15,7 @@ import json
 from sqlalchemy import text
 from datetime import datetime, date
 import tempfile
+from sqlalchemy.exc import SQLAlchemyError
 
 
 
@@ -601,3 +602,4 @@ def restaurar_db():
         logger.error(f"ERROR: Fallo inesperado en restaurar_db: {str(e)}")
         db.session.rollback()
         return jsonify({"error": f"Fallo inesperado: {str(e)}"}), 500
+    
