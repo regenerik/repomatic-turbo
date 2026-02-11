@@ -1,9 +1,9 @@
-from flask import Blueprint, send_file, make_response, request, jsonify, render_template, current_app, Response # Blueprint para modularizar y relacionar con app
+from flask import stream_with_context, Blueprint, send_file, make_response, request, jsonify, render_template, current_app, Response # Blueprint para modularizar y relacionar con app
 from flask_bcrypt import Bcrypt                                  # Bcrypt para encriptación
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity   # Jwt para tokens
 from database import db                                          # importa la db desde database.py
 from datetime import timedelta, datetime                         # importa tiempo especifico para rendimiento de token válido
-from utils.rescate_utils import exportar_reporte_json, exportar_y_guardar_reporte, obtener_reporte, iniciar_sesion_y_obtener_sesskey, compilar_reportes_existentes
+from utils.rescate_utils import exportar_reporte_json, exportar_y_guardar_reporte, obtener_reporte,iniciar_sesion_y_obtener_sesskey, iniciar_sesion_y_obtener_sesskey_nuevo, compilar_reportes_existentes
 from logging_config import logger
 import os                                                        # Para datos .env
 from models import Reporte
@@ -15,7 +15,9 @@ import pandas as pd
 from io import BytesIO
 import io
 from sqlalchemy import asc, desc
-
+from datetime import datetime
+import requests
+from urllib.parse import urlparse
 
 
 rescate_reportes_bp = Blueprint('rescate_reportes_bp', __name__)     # instanciar admin_bp desde clase Blueprint para crear las rutas.
@@ -398,3 +400,131 @@ def delete_individual_report(id):
             "ok": False,
             "codigo": 500
         }), 500
+
+# Reportes diferenciados 2026 de Herni>>>>>>>>>>
+
+
+@rescate_reportes_bp.route('/descargar_excel_campus', methods=['POST'])
+def descargar_excel_campus():
+    logger.info("POST > /descargar_excel_campus comenzando...")
+
+    data = request.get_json(silent=True) or {}
+
+    if 'username' not in data or 'password' not in data or 'url' not in data:
+        return jsonify({"error": "Falta username, password o url en el cuerpo JSON"}), 400
+
+    username = data['username']
+    password = data['password']
+    export_url = str(data['url']).strip()
+
+    # --- Validación básica (anti-proxy-abusado) ---
+    try:
+        parsed = urlparse(export_url)
+    except Exception:
+        return jsonify({"error": "URL inválida"}), 400
+
+    if parsed.scheme not in ("http", "https"):
+        return jsonify({"error": "URL inválida (scheme)"}), 400
+
+    # Aseguramos que sea el campus (ajustá si el dominio cambia)
+    if parsed.netloc.lower() != "www.campuscomercialypf.com":
+        return jsonify({"error": "URL no permitida. Solo se acepta www.campuscomercialypf.com"}), 400
+
+    # (Opcional) si querés restringir a SOLO esta ruta:
+    # if not parsed.path.startswith("/report/custom/index.php"):
+    #     return jsonify({"error": "URL no permitida (path)"}), 400
+
+    logger.info(f"1 - Export URL solicitada: {export_url}")
+
+    # 1) Login (cookies + permisos)
+    session, _sesskey = iniciar_sesion_y_obtener_sesskey_nuevo(username, password, export_url)
+    if not session:
+        logger.error("2 - Error iniciando sesión: no se obtuvo session.")
+        return jsonify({"error": "Error al iniciar sesión (session inválida)."}), 500
+
+    # 2) GET al export (streaming)
+    try:
+        r = session.get(
+            export_url,
+            stream=True,
+            allow_redirects=True,
+            timeout=(15, 180)
+        )
+
+        # Si termina en login, no quedó autenticado
+        final_url = (r.url or "").lower()
+        if "login" in final_url or "login/index.php" in final_url:
+            logger.warning(f"3 - Redirigió a login: {r.url}")
+            r.close()
+            return jsonify({"error": "No autorizado: la sesión no quedó autenticada (redirigió a login)."}), 401
+
+        if r.status_code != 200:
+            logger.error(f"3 - Status inesperado: {r.status_code}")
+            snippet = ""
+            try:
+                snippet = next(r.iter_content(chunk_size=2048), b"").decode("utf-8", errors="ignore")
+            except Exception:
+                pass
+            r.close()
+            return jsonify({"error": "Fallo al descargar el archivo", "status": r.status_code, "detail": snippet[:300]}), 502
+
+        # Peek para detectar HTML camuflado
+        it = r.iter_content(chunk_size=8192)
+        first_chunk = next(it, b"")
+
+        content_type = (r.headers.get("Content-Type") or "").lower()
+        first_lower = first_chunk.lstrip().lower()
+        if ("text/html" in content_type) or first_lower.startswith(b"<!doctype html") or (b"<html" in first_lower[:300]):
+            logger.warning("4 - El export devolvió HTML, no Excel. Probable sesión no autorizada o error del portal.")
+            extra = b""
+            try:
+                extra = next(it, b"")
+            except Exception:
+                pass
+            r.close()
+            preview = (first_chunk + extra)[:1500].decode("utf-8", errors="ignore")
+            return jsonify({
+                "error": "El export devolvió HTML (no Excel). Probable falta de permisos o sesión inválida.",
+                "content_type": content_type,
+                "preview": preview
+            }), 502
+
+        # Nombre de archivo: si viene en Content-Disposition lo respetamos
+        cd = r.headers.get("Content-Disposition", "")
+        filename = None
+        m = re.search(r'filename\*?="?([^";]+)"?', cd, flags=re.IGNORECASE)
+        if m:
+            filename = m.group(1).strip()
+
+        if not filename:
+            local_tz = pytz.timezone('America/Argentina/Buenos_Aires')
+            timestamp = datetime.now(local_tz).strftime('%d-%m-%Y_%H-%M')
+            filename = f"campus_export_{timestamp}.xlsx"
+
+        # Content-Type decente
+        out_ct = r.headers.get("Content-Type")
+        if not out_ct or "application" not in out_ct.lower():
+            out_ct = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+        def generate():
+            try:
+                if first_chunk:
+                    yield first_chunk
+                for chunk in it:
+                    if chunk:
+                        yield chunk
+            finally:
+                r.close()
+
+        resp = Response(stream_with_context(generate()), mimetype=out_ct)
+        resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        resp.headers["Cache-Control"] = "no-store"
+        logger.info("5 - Enviando Excel por streaming. Fin.")
+        return resp, 200
+
+    except requests.RequestException as e:
+        logger.exception(f"Error HTTP descargando export: {e}")
+        return jsonify({"error": "Error HTTP al descargar el export", "detail": str(e)}), 502
+    except Exception as e:
+        logger.exception(f"Error inesperado: {e}")
+        return jsonify({"error": "Error inesperado al descargar el export", "detail": str(e)}), 500

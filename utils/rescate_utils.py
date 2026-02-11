@@ -128,6 +128,79 @@ def iniciar_sesion_y_obtener_sesskey(username, password, report_url):
     logger.info("Error: No se pudo obtener el sesskey")
     return None, None
 
+# ---------- Util general para los nuevos url de herni >>>
+
+def iniciar_sesion_y_obtener_sesskey_nuevo(username, password, report_url):
+    session = requests.Session()
+    logger.info("2 - Función Util iniciar_sesion_y_obtener_sesskey iniciando...")
+
+    # Paso 1: Obtener el logintoken
+    login_page_url = "https://www.campuscomercialypf.com/login/index.php"
+    try:
+        login_page_response = session.get(login_page_url, timeout=10)
+        login_page_response.raise_for_status()
+
+        login_page_soup = BeautifulSoup(login_page_response.text, 'html.parser')
+        logintoken_input = login_page_soup.find('input', {'name': 'logintoken'})
+        logintoken = logintoken_input['value'] if logintoken_input else None
+
+        logger.info("3 - Token recuperado. Iniciando log-in...")
+    except requests.exceptions.RequestException as e:
+        logger.info(f"Error al obtener la página de login: {e}")
+        logger.info("Si llegaste a este error, puede ser que la red esté caída o la URL del campus haya cambiado.")
+        return None, None
+
+    # Paso 2: Realizar el inicio de sesión
+    login_payload = {
+        "username": username,
+        "password": password,
+        "logintoken": logintoken,
+        "anchor": ""
+    }
+    login_headers = {
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+
+    try:
+        login_response = session.post(login_page_url, data=login_payload, headers=login_headers, timeout=15)
+        login_response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        logger.info(f"Error en el POST de login: {e}")
+        return None, None
+
+    # Validación del login: mantenemos tu criterio, pero un poquito más robusto
+    if "TotaraSession" in session.cookies:
+        logger.info("4 - Inicio de sesión exitoso. Intentando capturar el sesskey (si existe)...")
+    else:
+        logger.info("Error en el inicio de sesión (no se detectó cookie TotaraSession).")
+        return None, None
+
+    # Paso 3: Obtener el sesskey dinámicamente desde la página (BEST-EFFORT)
+    sesskey = None
+    try:
+        dashboard_response = session.get(report_url, timeout=20)
+        dashboard_response.raise_for_status()
+
+        soup = BeautifulSoup(dashboard_response.text, 'html.parser')
+        sesskey_link = soup.find('a', href=re.compile(r'/login/logout.php\?sesskey='))
+
+        if sesskey_link and sesskey_link.get("href"):
+            sesskey_url = sesskey_link["href"]
+            m = re.search(r'sesskey=([a-zA-Z0-9]+)', sesskey_url)
+            if m:
+                sesskey = m.group(1)
+                logger.info("5 - Sesskey recuperado.")
+            else:
+                logger.warning("5 - Se encontró link de logout pero no se pudo parsear sesskey.")
+        else:
+            logger.warning("5 - No se encontró sesskey en el HTML de report_url. Se devuelve session igual.")
+    except requests.exceptions.RequestException as e:
+        logger.warning(f"5 - No se pudo cargar report_url para buscar sesskey ({e}). Se devuelve session igual.")
+    except Exception as e:
+        logger.warning(f"5 - Error inesperado buscando sesskey ({e}). Se devuelve session igual.")
+
+    # ✅ Cambio clave: NO MATAMOS LA SESSION si no hay sesskey
+    return session, sesskey
 
 # -----------------------------------UTILS PARA LLAMADA SIMPLE------------------------------------
 
