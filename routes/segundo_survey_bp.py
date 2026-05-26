@@ -22,6 +22,7 @@ jwt = JWTManager()
 API_KEY = os.getenv('API_KEY')
 
 JOBS = {}
+LATEST_JOB_ID = None
 JOBS_LOCK = threading.Lock()
 
 
@@ -47,6 +48,21 @@ def get_job(job_id):
         return dict(job) if job else None
 
 
+def set_latest_job(job_id):
+    global LATEST_JOB_ID
+    with JOBS_LOCK:
+        LATEST_JOB_ID = job_id
+
+
+def get_latest_job():
+    with JOBS_LOCK:
+        if not LATEST_JOB_ID:
+            return None
+
+        job = JOBS.get(LATEST_JOB_ID)
+        return dict(job) if job else None
+
+
 @segundo_survey_bp.before_request
 def authorize():
     if request.method == 'OPTIONS':
@@ -55,6 +71,7 @@ def authorize():
     public_exact_paths = [
         '/descargar_segundo_survey',
         '/recuperar_segundo_survey',
+        '/estado_segundo_survey_actual',
         '/test_segundo_survey_bp',
         '/test_encuestas_cursos_bp',
         '/',
@@ -114,6 +131,7 @@ def obtener_y_guardar_survey_ruta():
         columns=None,
         binary_size_bytes=None,
     )
+    set_latest_job(job_id)
 
     logger.info("0 - GET > /recuperar_segundo_survey iniciado. job_id=%s", job_id)
     executor.submit(run_obtener_y_guardar_survey, app, job_id)
@@ -121,8 +139,11 @@ def obtener_y_guardar_survey_ruta():
     return jsonify({
         'message': 'El proceso de recuperacion del segundo survey ha comenzado',
         'job_id': job_id,
-        'status_url': f'/estado_segundo_survey/{job_id}',
-        'download_url': f'/descargar_segundo_survey?job_id={job_id}',
+        'status': 'queued',
+        'status_url': '/estado_segundo_survey_actual',
+        'download_url': '/descargar_segundo_survey',
+        'job_status_url': f'/estado_segundo_survey/{job_id}',
+        'job_download_url': f'/descargar_segundo_survey?job_id={job_id}',
     }), 202
 
 
@@ -143,6 +164,7 @@ def run_obtener_y_guardar_survey(app, job_id):
             rows=result.get('rows'),
             columns=result.get('columns'),
             binary_size_bytes=result.get('binary_size_bytes'),
+            elapsed_time=result.get('elapsed_time'),
         )
 
         logger.info(
@@ -161,6 +183,19 @@ def run_obtener_y_guardar_survey(app, job_id):
             finished_at=now_iso(),
             error=str(e),
         )
+
+
+@segundo_survey_bp.route('/estado_segundo_survey_actual', methods=['GET'])
+def estado_segundo_survey_actual():
+    job = get_latest_job()
+
+    if not job:
+        return jsonify({
+            'message': 'No hay job reciente en memoria',
+            'status': 'not_found',
+        }), 404
+
+    return jsonify(job), 200
 
 
 @segundo_survey_bp.route('/estado_segundo_survey/<job_id>', methods=['GET'])
@@ -184,30 +219,38 @@ def descargar_segundo_survey():
 
         if job_id:
             job = get_job(job_id)
+        else:
+            job = get_latest_job()
 
-            if not job:
-                return jsonify({
-                    'message': 'No se encontro ese job_id. No puedo garantizar que la descarga corresponda a ese tramite.',
-                    'job_id': job_id,
-                }), 404
-
-            if job.get('status') != 'completed':
+        if job:
+            if job.get('status') in ('queued', 'running'):
                 return jsonify({
                     'message': 'El proceso todavia no esta completo',
-                    'job_id': job_id,
+                    'job_id': job.get('job_id'),
                     'status': job.get('status'),
                     'error': job.get('error'),
                 }), 409
 
-            record_id = job.get('record_id')
-            survey_record = SegundoSurvey.query.get(record_id)
-
-            if not survey_record:
+            if job.get('status') == 'failed':
                 return jsonify({
-                    'message': 'El job termino, pero no se encontro el registro asociado en DB',
-                    'job_id': job_id,
-                    'record_id': record_id,
-                }), 404
+                    'message': 'El ultimo proceso fallo. No se descarga para evitar usar datos viejos.',
+                    'job_id': job.get('job_id'),
+                    'status': job.get('status'),
+                    'error': job.get('error'),
+                }), 409
+
+            if job.get('status') == 'completed':
+                record_id = job.get('record_id')
+                survey_record = SegundoSurvey.query.get(record_id)
+
+                if not survey_record:
+                    return jsonify({
+                        'message': 'El job termino, pero no se encontro el registro asociado en DB',
+                        'job_id': job.get('job_id'),
+                        'record_id': record_id,
+                    }), 404
+            else:
+                survey_record = SegundoSurvey.query.order_by(SegundoSurvey.id.desc()).first()
         else:
             survey_record = SegundoSurvey.query.order_by(SegundoSurvey.id.desc()).first()
 
