@@ -1,93 +1,244 @@
-from flask import Blueprint, send_file, request, jsonify, current_app, Response # Blueprint para modularizar y relacionar con app
-from flask_bcrypt import Bcrypt                                  # Bcrypt para encriptación
+from flask import Blueprint, send_file, request, jsonify, current_app
+from flask_bcrypt import Bcrypt
 from flask_jwt_extended import JWTManager
 from models import SegundoSurvey
-from database import db                                          # importa la db desde database.py
+from database import db
 from utils.segundo_survey_utils import obtener_y_guardar_survey
 from logging_config import logger
-import os                                                        # Para datos .env
-from dotenv import load_dotenv                                   # Para datos .env
+import os
+from dotenv import load_dotenv
 load_dotenv()
 import pandas as pd
 from io import BytesIO
+from datetime import datetime, timezone
+import threading
+import uuid
 
 
-
-segundo_survey_bp = Blueprint('segundo_survey_bp', __name__)     # instanciar admin_bp desde clase Blueprint para crear las rutas.
+segundo_survey_bp = Blueprint('segundo_survey_bp', __name__)
 bcrypt = Bcrypt()
 jwt = JWTManager()
 
-# Sistema de key base pre rutas ------------------------:
-
 API_KEY = os.getenv('API_KEY')
+
+JOBS = {}
+JOBS_LOCK = threading.Lock()
+
+
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
 
 def check_api_key(api_key):
     return api_key == API_KEY
+
+
+def update_job(job_id, **changes):
+    with JOBS_LOCK:
+        job = JOBS.get(job_id, {})
+        job.update(changes)
+        JOBS[job_id] = job
+        return dict(job)
+
+
+def get_job(job_id):
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        return dict(job) if job else None
+
 
 @segundo_survey_bp.before_request
 def authorize():
     if request.method == 'OPTIONS':
         return
-    if request.path in ['/descargar_segundo_survey','/recuperar_segundo_survey','/test_encuestas_cursos_bp','/','/correccion_campos_vacios','/descargar_positividad_corregida','/download_comments_evaluation','/all_comments_evaluation','/download_resume_csv','/create_resumes_of_all','/descargar_excel','/create_resumes', '/reportes_disponibles', '/create_user', '/login', '/users','/update_profile','/update_profile_image','/update_admin']:
+
+    public_exact_paths = [
+        '/descargar_segundo_survey',
+        '/recuperar_segundo_survey',
+        '/test_segundo_survey_bp',
+        '/test_encuestas_cursos_bp',
+        '/',
+        '/correccion_campos_vacios',
+        '/descargar_positividad_corregida',
+        '/download_comments_evaluation',
+        '/all_comments_evaluation',
+        '/download_resume_csv',
+        '/create_resumes_of_all',
+        '/descargar_excel',
+        '/create_resumes',
+        '/reportes_disponibles',
+        '/create_user',
+        '/login',
+        '/users',
+        '/update_profile',
+        '/update_profile_image',
+        '/update_admin',
+    ]
+
+    if request.path in public_exact_paths:
         return
+
+    if request.path.startswith('/estado_segundo_survey/'):
+        return
+
     api_key = request.headers.get('Authorization')
     if not api_key or not check_api_key(api_key):
         return jsonify({'message': 'Unauthorized'}), 401
-    
-# RUTA TEST:
+
 
 @segundo_survey_bp.route('/test_segundo_survey_bp', methods=['GET'])
 def test():
-    return jsonify({'message': 'test bien sucedido','status':"Si lees esto, las rutas de segundo_survey funciona okkk..."}),200
+    return jsonify({
+        'message': 'test bien sucedido',
+        'status': 'Si lees esto, las rutas de segundo_survey funcionan ok'
+    }), 200
 
 
-# RUTAS SURVEY NUEVAS ( PEDIDO Y RECUPERACION )-------------------------------------------------------------//////////////////////////
 @segundo_survey_bp.route('/recuperar_segundo_survey', methods=['GET'])
 def obtener_y_guardar_survey_ruta():
     from extensions import executor
-    logger.info("0 - GET > /recuperar_segundo_survey a comenzando...")
-    
-    # Lanzar la función de exportar y guardar reporte en un job separado
-    executor.submit(run_obtener_y_guardar_survey)
 
-    logger.info(f"1 - Hilo de ejecución independiente inicializado, retornando 200...")
+    job_id = str(uuid.uuid4())
+    app = current_app._get_current_object()
 
-    return jsonify({"message": "El proceso de recuperacion del segundo survey ha comenzado"}), 200
+    update_job(
+        job_id,
+        job_id=job_id,
+        status='queued',
+        created_at=now_iso(),
+        started_at=None,
+        finished_at=None,
+        error=None,
+        record_id=None,
+        rows=None,
+        columns=None,
+        binary_size_bytes=None,
+    )
 
-def run_obtener_y_guardar_survey():
-    with current_app.app_context():
-        obtener_y_guardar_survey()
+    logger.info("0 - GET > /recuperar_segundo_survey iniciado. job_id=%s", job_id)
+    executor.submit(run_obtener_y_guardar_survey, app, job_id)
 
-    
+    return jsonify({
+        'message': 'El proceso de recuperacion del segundo survey ha comenzado',
+        'job_id': job_id,
+        'status_url': f'/estado_segundo_survey/{job_id}',
+        'download_url': f'/descargar_segundo_survey?job_id={job_id}',
+    }), 202
+
+
+def run_obtener_y_guardar_survey(app, job_id):
+    update_job(job_id, status='running', started_at=now_iso())
+    logger.info("1 - Job segundo survey corriendo. job_id=%s", job_id)
+
+    try:
+        with app.app_context():
+            result = obtener_y_guardar_survey(job_id=job_id)
+
+        update_job(
+            job_id,
+            status='completed',
+            finished_at=now_iso(),
+            error=None,
+            record_id=result.get('record_id'),
+            rows=result.get('rows'),
+            columns=result.get('columns'),
+            binary_size_bytes=result.get('binary_size_bytes'),
+        )
+
+        logger.info(
+            "2 - Job segundo survey completado. job_id=%s record_id=%s rows=%s size=%s",
+            job_id,
+            result.get('record_id'),
+            result.get('rows'),
+            result.get('binary_size_bytes'),
+        )
+
+    except Exception as e:
+        logger.error("2 - Job segundo survey fallido. job_id=%s error=%s", job_id, str(e), exc_info=True)
+        update_job(
+            job_id,
+            status='failed',
+            finished_at=now_iso(),
+            error=str(e),
+        )
+
+
+@segundo_survey_bp.route('/estado_segundo_survey/<job_id>', methods=['GET'])
+def estado_segundo_survey(job_id):
+    job = get_job(job_id)
+
+    if not job:
+        return jsonify({
+            'message': 'No se encontro ese job_id. Si el servidor se reinicio, el estado en memoria se perdio.',
+            'job_id': job_id,
+            'status': 'not_found',
+        }), 404
+
+    return jsonify(job), 200
+
 
 @segundo_survey_bp.route('/descargar_segundo_survey', methods=['GET'])
 def descargar_segundo_survey():
     try:
-        # Obtener el registro más reciente de la base de datos
-        survey_record = SegundoSurvey.query.order_by(SegundoSurvey.id.desc()).first()
+        job_id = request.args.get('job_id')
+
+        if job_id:
+            job = get_job(job_id)
+
+            if not job:
+                return jsonify({
+                    'message': 'No se encontro ese job_id. No puedo garantizar que la descarga corresponda a ese tramite.',
+                    'job_id': job_id,
+                }), 404
+
+            if job.get('status') != 'completed':
+                return jsonify({
+                    'message': 'El proceso todavia no esta completo',
+                    'job_id': job_id,
+                    'status': job.get('status'),
+                    'error': job.get('error'),
+                }), 409
+
+            record_id = job.get('record_id')
+            survey_record = SegundoSurvey.query.get(record_id)
+
+            if not survey_record:
+                return jsonify({
+                    'message': 'El job termino, pero no se encontro el registro asociado en DB',
+                    'job_id': job_id,
+                    'record_id': record_id,
+                }), 404
+        else:
+            survey_record = SegundoSurvey.query.order_by(SegundoSurvey.id.desc()).first()
 
         if not survey_record:
-            return jsonify({"message": "No se encontraron encuestas en la base de datos"}), 404
+            return jsonify({'message': 'No se encontraron encuestas en la base de datos'}), 404
 
-        # Convertir los datos binarios de vuelta a DataFrame
-        logger.info("Recuperando archivo binario desde la base de datos...")
+        logger.info("Recuperando segundo survey desde DB. record_id=%s", survey_record.id)
+
         binary_data = survey_record.data
         df_responses = pd.read_pickle(BytesIO(binary_data))
 
-        # Convertir DataFrame a Excel en memoria
         output = BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             df_responses.to_excel(writer, index=False, sheet_name='Sheet1')
 
-        # Preparar el archivo Excel para enviarlo
         output.seek(0)
-        logger.info("Archivo Excel creado y listo para descargar.")
 
-        return send_file(output, download_name='segundo_survey_respuestas.xlsx', as_attachment=True, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        logger.info(
+            "Archivo Excel segundo survey listo. record_id=%s filas=%s columnas=%s",
+            survey_record.id,
+            df_responses.shape[0],
+            df_responses.shape[1],
+        )
+
+        return send_file(
+            output,
+            download_name='segundo_survey_respuestas.xlsx',
+            as_attachment=True,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
 
     except Exception as e:
-        logger.error(f"Error al generar el archivo Excel: {str(e)}")
-        return jsonify({"message": "Hubo un error al generar el archivo Excel"}), 500
-
-
-# ----------------------------------------------------------------------------------------------------------//////////////////////////
+        logger.error("Error al generar el archivo Excel segundo survey: %s", str(e), exc_info=True)
+        return jsonify({'message': 'Hubo un error al generar el archivo Excel'}), 500
