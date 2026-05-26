@@ -34,17 +34,17 @@ def check_api_key(api_key):
     return api_key == API_KEY
 
 
-def update_job(job_id, **changes):
+def update_job(target_job_id, **changes):
     with JOBS_LOCK:
-        job = JOBS.get(job_id, {})
+        job = JOBS.get(target_job_id, {})
         job.update(changes)
-        JOBS[job_id] = job
+        JOBS[target_job_id] = job
         return dict(job)
 
 
-def get_job(job_id):
+def get_job(target_job_id):
     with JOBS_LOCK:
-        job = JOBS.get(job_id)
+        job = JOBS.get(target_job_id)
         return dict(job) if job else None
 
 
