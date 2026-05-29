@@ -1,185 +1,358 @@
-from flask import Blueprint, send_file, request, jsonify, current_app, Response # Blueprint para modularizar y relacionar con app
-from flask_bcrypt import Bcrypt                                  # Bcrypt para encriptación
+from flask import Blueprint, send_file, request, jsonify, current_app
+from flask_bcrypt import Bcrypt
 from flask_jwt_extended import JWTManager
 from models import CuartoSurvey
-from database import db                                          # importa la db desde database.py
-from utils.cuarto_survey_utils import obtener_y_guardar_cuarto_survey
+from utils.cuarto_survey_utils import (
+    obtener_y_guardar_cuarto_survey,
+    build_surveymonkey_session,
+    get_json_or_raise,
+    DEFAULT_FOURTH_SURVEY_ID,
+)
 from logging_config import logger
-import os                                                        # Para datos .env
-from dotenv import load_dotenv                                   # Para datos .env
+import os
+from dotenv import load_dotenv
 load_dotenv()
 import pandas as pd
 from io import BytesIO
-import requests
+from datetime import datetime, timezone
+import threading
+import uuid
 import json
 
 
-
-
-cuarto_survey_bp = Blueprint('cuarto_survey_bp', __name__)     # instanciar admin_bp desde clase Blueprint para crear las rutas.
+cuarto_survey_bp = Blueprint('cuarto_survey_bp', __name__)
 bcrypt = Bcrypt()
 jwt = JWTManager()
 
-# Sistema de key base pre rutas ------------------------:
-
 API_KEY = os.getenv('API_KEY')
+
+JOBS = {}
+LATEST_JOB_ID = None
+JOBS_LOCK = threading.Lock()
+
+
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
 
 def check_api_key(api_key):
     return api_key == API_KEY
+
+
+def update_job(target_job_id, **changes):
+    with JOBS_LOCK:
+        job = JOBS.get(target_job_id, {})
+        job.update(changes)
+        JOBS[target_job_id] = job
+        return dict(job)
+
+
+def get_job(target_job_id):
+    with JOBS_LOCK:
+        job = JOBS.get(target_job_id)
+        return dict(job) if job else None
+
+
+def set_latest_job(job_id):
+    global LATEST_JOB_ID
+    with JOBS_LOCK:
+        LATEST_JOB_ID = job_id
+
+
+def get_latest_job():
+    with JOBS_LOCK:
+        if not LATEST_JOB_ID:
+            return None
+
+        job = JOBS.get(LATEST_JOB_ID)
+        return dict(job) if job else None
+
 
 @cuarto_survey_bp.before_request
 def authorize():
     if request.method == 'OPTIONS':
         return
-    if request.path in ['/recuperar_cuarto_survey','/test_cuarto_survey_bp','/descargar_cuarto_survey','/recuperar_segundo_survey','/test_encuestas_cursos_bp','/','/correccion_campos_vacios','/descargar_positividad_corregida','/download_comments_evaluation','/all_comments_evaluation','/download_resume_csv','/create_resumes_of_all','/descargar_excel','/create_resumes', '/reportes_disponibles', '/create_user', '/login', '/users','/update_profile','/update_profile_image','/update_admin']:
+
+    public_exact_paths = [
+        '/descargar_cuarto_survey',
+        '/recuperar_cuarto_survey',
+        '/estado_cuarto_survey_actual',
+        '/test_cuarto_survey_bp',
+        '/recuperar_segundo_survey',
+        '/test_encuestas_cursos_bp',
+        '/',
+        '/correccion_campos_vacios',
+        '/descargar_positividad_corregida',
+        '/download_comments_evaluation',
+        '/all_comments_evaluation',
+        '/download_resume_csv',
+        '/create_resumes_of_all',
+        '/descargar_excel',
+        '/create_resumes',
+        '/reportes_disponibles',
+        '/create_user',
+        '/login',
+        '/users',
+        '/update_profile',
+        '/update_profile_image',
+        '/update_admin',
+    ]
+
+    if request.path in public_exact_paths:
         return
+
+    if request.path.startswith('/estado_cuarto_survey/'):
+        return
+
     api_key = request.headers.get('Authorization')
     if not api_key or not check_api_key(api_key):
         return jsonify({'message': 'Unauthorized'}), 401
-    
-# RUTA TEST:
+
 
 @cuarto_survey_bp.route('/test_cuarto_survey_bp', methods=['GET'])
 def test():
-    return jsonify({'message': 'test bien sucedido','status':"Si lees esto, las rutas de cuarto_survey funciona okkk..."}),200
-
-
-# RUTAS SURVEY NUEVAS ( PEDIDO Y RECUPERACION )-------------------------------------------------------------//////////////////////////
-# @cuarto_survey_bp.route('/recuperar_cuarto_survey', methods=['GET'])
-# def obtener_y_guardar_survey_ruta():
-#     from extensions import executor
-#     logger.info("0 - GET > /recuperar_cuarto_survey a comenzando...")
-    
-#     # Lanzar la función de exportar y guardar reporte en un job separado
-#     executor.submit(run_obtener_y_guardar_survey)
-
-#     logger.info(f"1 - Hilo de ejecución independiente inicializado, retornando 200...")
-
-#     return jsonify({"message": "El proceso de recuperacion del cuarto survey ha comenzado"}), 200
-
-# def run_obtener_y_guardar_survey():
-#     with current_app.app_context():
-#         obtener_y_guardar_survey()
-
-    
-
-# @cuarto_survey_bp.route('/descargar_cuarto_survey', methods=['GET'])
-# def descargar_segundo_survey():
-#     try:
-#         # Obtener el registro más reciente de la base de datos
-#         survey_record = CuartoSurvey.query.order_by(CuartoSurvey.id.desc()).first()
-
-#         if not survey_record:
-#             return jsonify({"message": "No se encontraron encuestas en la base de datos"}), 404
-
-#         # Convertir los datos binarios de vuelta a DataFrame
-#         logger.info("Recuperando archivo binario desde la base de datos...")
-#         binary_data = survey_record.data
-#         df_responses = pd.read_pickle(BytesIO(binary_data))
-
-#         # Convertir DataFrame a Excel en memoria
-#         output = BytesIO()
-#         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-#             df_responses.to_excel(writer, index=False, sheet_name='Sheet1')
-
-#         # Preparar el archivo Excel para enviarlo
-#         output.seek(0)
-#         logger.info("Archivo Excel creado y listo para descargar.")
-
-#         return send_file(output, download_name='cuarto_survey_respuestas.xlsx', as_attachment=True, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-
-#     except Exception as e:
-#         logger.error(f"Error al generar el archivo Excel: {str(e)}")
-#         return jsonify({"message": "Hubo un error al generar el archivo Excel"}), 500
-
-
-# ----------------------------------------------------------------------------------------------------------//////////////////////////
+    return jsonify({
+        'message': 'test bien sucedido',
+        'status': 'Si lees esto, las rutas de cuarto_survey funcionan ok'
+    }), 200
 
 
 @cuarto_survey_bp.route('/recuperar_cuarto_survey', methods=['GET'])
 def iniciar_recuperacion_cuarto():
     from extensions import executor
-    current_app.logger.info("🔔 Iniciando recuperación del cuarto survey...")
-    executor.submit(run_obtener_y_guardar_cuarto)
-    return jsonify({"message": "Proceso de recuperación del cuarto survey iniciado"}), 200
 
-def run_obtener_y_guardar_cuarto():
-    with current_app.app_context():
-        obtener_y_guardar_cuarto_survey()
+    job_id = str(uuid.uuid4())
+    app = current_app._get_current_object()
+
+    update_job(
+        job_id,
+        job_id=job_id,
+        status='queued',
+        created_at=now_iso(),
+        started_at=None,
+        finished_at=None,
+        error=None,
+        record_id=None,
+        rows=None,
+        columns=None,
+        binary_size_bytes=None,
+    )
+    set_latest_job(job_id)
+
+    logger.info('0 - GET > /recuperar_cuarto_survey iniciado. job_id=%s', job_id)
+    executor.submit(run_obtener_y_guardar_cuarto, app, job_id)
+
+    return jsonify({
+        'message': 'El proceso de recuperacion del cuarto survey ha comenzado',
+        'job_id': job_id,
+        'status': 'queued',
+        'status_url': '/estado_cuarto_survey_actual',
+        'download_url': '/descargar_cuarto_survey',
+        'job_status_url': f'/estado_cuarto_survey/{job_id}',
+        'job_download_url': f'/descargar_cuarto_survey?job_id={job_id}',
+    }), 202
+
+
+def run_obtener_y_guardar_cuarto(app, job_id):
+    update_job(job_id, status='running', started_at=now_iso())
+    logger.info('1 - Job cuarto survey corriendo. job_id=%s', job_id)
+
+    try:
+        with app.app_context():
+            result = obtener_y_guardar_cuarto_survey(job_id=job_id)
+
+        update_job(
+            job_id,
+            status='completed',
+            finished_at=now_iso(),
+            error=None,
+            record_id=result.get('record_id'),
+            rows=result.get('rows'),
+            columns=result.get('columns'),
+            binary_size_bytes=result.get('binary_size_bytes'),
+            elapsed_time=result.get('elapsed_time'),
+        )
+
+        logger.info(
+            '2 - Job cuarto survey completado. job_id=%s record_id=%s rows=%s size=%s',
+            job_id,
+            result.get('record_id'),
+            result.get('rows'),
+            result.get('binary_size_bytes'),
+        )
+
+    except Exception as e:
+        logger.error('2 - Job cuarto survey fallido. job_id=%s error=%s', job_id, str(e), exc_info=True)
+        update_job(
+            job_id,
+            status='failed',
+            finished_at=now_iso(),
+            error=str(e),
+        )
+
+
+@cuarto_survey_bp.route('/estado_cuarto_survey_actual', methods=['GET'])
+def estado_cuarto_survey_actual():
+    job = get_latest_job()
+
+    if not job:
+        return jsonify({
+            'message': 'No hay job reciente en memoria',
+            'status': 'not_found',
+        }), 404
+
+    return jsonify(job), 200
+
+
+@cuarto_survey_bp.route('/estado_cuarto_survey/<job_id>', methods=['GET'])
+def estado_cuarto_survey(job_id):
+    job = get_job(job_id)
+
+    if not job:
+        return jsonify({
+            'message': 'No se encontro ese job_id. Si el servidor se reinicio, el estado en memoria se perdio.',
+            'job_id': job_id,
+            'status': 'not_found',
+        }), 404
+
+    return jsonify(job), 200
 
 
 @cuarto_survey_bp.route('/descargar_cuarto_survey', methods=['GET'])
 def descargar_cuarto():
     try:
-        registro = CuartoSurvey.query.order_by(CuartoSurvey.id.desc()).first()
-        if not registro:
-            return jsonify({"message": "No hay datos del cuarto survey en la DB"}), 404
+        job_id = request.args.get('job_id')
 
-        # deserializo el pickle a DataFrame
-        binary = registro.data
-        df = pd.read_pickle(BytesIO(binary))
+        if job_id:
+            job = get_job(job_id)
+        else:
+            job = get_latest_job()
 
-        # armo el Excel en memoria
-        salida = BytesIO()
-        with pd.ExcelWriter(salida, engine='xlsxwriter') as writer:
-            df.to_excel(writer, index=False, sheet_name='Sheet1')
-        salida.seek(0)
+        if job:
+            if job.get('status') in ('queued', 'running'):
+                return jsonify({
+                    'message': 'El proceso todavia no esta completo',
+                    'job_id': job.get('job_id'),
+                    'status': job.get('status'),
+                    'error': job.get('error'),
+                }), 409
 
-        current_app.logger.info("✅ Excel del cuarto survey listo para descargar")
+            if job.get('status') == 'failed':
+                return jsonify({
+                    'message': 'El ultimo proceso fallo. No se descarga para evitar usar datos viejos.',
+                    'job_id': job.get('job_id'),
+                    'status': job.get('status'),
+                    'error': job.get('error'),
+                }), 409
+
+            if job.get('status') == 'completed':
+                record_id = job.get('record_id')
+                survey_record = CuartoSurvey.query.get(record_id)
+
+                if not survey_record:
+                    return jsonify({
+                        'message': 'El job termino, pero no se encontro el registro asociado en DB',
+                        'job_id': job.get('job_id'),
+                        'record_id': record_id,
+                    }), 404
+            else:
+                survey_record = CuartoSurvey.query.order_by(CuartoSurvey.id.desc()).first()
+        else:
+            survey_record = CuartoSurvey.query.order_by(CuartoSurvey.id.desc()).first()
+
+        if not survey_record:
+            return jsonify({'message': 'No hay datos del cuarto survey en la DB'}), 404
+
+        logger.info('Recuperando cuarto survey desde DB. record_id=%s', survey_record.id)
+
+        binary_data = survey_record.data
+        df_responses = pd.read_pickle(BytesIO(binary_data))
+
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            df_responses.to_excel(writer, index=False, sheet_name='Sheet1')
+
+        output.seek(0)
+
+        logger.info(
+            'Archivo Excel cuarto survey listo. record_id=%s filas=%s columnas=%s',
+            survey_record.id,
+            df_responses.shape[0],
+            df_responses.shape[1],
+        )
+
         return send_file(
-            salida,
+            output,
             download_name='cuarto_survey_respuestas.xlsx',
             as_attachment=True,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         )
+
     except Exception as e:
-        current_app.logger.error(f"💣 Error al generar Excel del cuarto survey: {e}")
-        return jsonify({"message": "Error al generar el Excel"}), 500
-    
+        logger.error('Error al generar el archivo Excel cuarto survey: %s', str(e), exc_info=True)
+        return jsonify({'message': 'Hubo un error al generar el archivo Excel'}), 500
 
-
-    # -------------------------------Recupero survey crudo
 
 @cuarto_survey_bp.route('/descargar_raw_cuarto_survey', methods=['GET'])
 def descargar_raw_cuarto_survey():
     """
-    Baja las respuestas bulk del cuarto survey en crudo y las devuelve
-    como un .json descargable (sin renombrar columnas, sin Excel, sin DB).
+    Baja las respuestas bulk del cuarto survey en crudo y las devuelve como .json.
+    La dejo por compatibilidad con tu herramienta de diagnostico.
     """
     try:
         access_token = os.getenv('SURVEYMONKEY_ACCESS_TOKEN')
-        survey_id    = '514508354'
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json"
-        }
-        HOST     = "https://api.surveymonkey.com"
-        endpoint = f"/v3/surveys/{survey_id}/responses/bulk"
-        
+        survey_id = (
+            os.getenv('FOURTH_SURVEY_ID')
+            or os.getenv('CUARTO_SURVEY_ID')
+            or os.getenv('FOURTH_SURVEYMONKEY_ID')
+            or DEFAULT_FOURTH_SURVEY_ID
+        )
+
+        if not access_token:
+            return jsonify({'message': 'Falta SURVEYMONKEY_ACCESS_TOKEN en variables de entorno'}), 500
+
+        session = build_surveymonkey_session(access_token)
+        host = 'https://api.surveymonkey.com'
+        url = f'{host}/v3/surveys/{survey_id}/responses/bulk'
+        params = {'page': 1, 'per_page': 1000}
+        page = 1
         all_data = []
-        url = f"{HOST}{endpoint}?per_page=1000"
-        current_app.logger.info("🚀 Bajando respuestas bulk en crudo...")
+
+        logger.info('Bajando cuarto survey raw. survey_id=%s', survey_id)
+
         while url:
-            r = requests.get(url, headers=headers)
-            if r.status_code != 200:
-                current_app.logger.error(f"Error {r.status_code} al bajar página: {r.text}")
+            js = get_json_or_raise(
+                session,
+                url,
+                params=params,
+                context=f'cuarto survey raw page {page}',
+            )
+
+            data = js.get('data', [])
+            if not isinstance(data, list):
+                return jsonify({'message': f'Formato inesperado en pagina raw {page}'}), 500
+
+            all_data.extend(data)
+            next_link = js.get('links', {}).get('next')
+
+            if next_link:
+                url = next_link
+                params = None
+                page += 1
+            else:
                 break
-            js = r.json()
-            all_data.extend(js.get("data", []))
-            url = js.get("links", {}).get("next")
-        
-        # armo el JSON en memoria
+
         buf = BytesIO()
         buf.write(json.dumps(all_data, ensure_ascii=False, indent=2).encode('utf-8'))
         buf.seek(0)
-        
+
         return send_file(
             buf,
             download_name='raw_cuarto_survey.json',
             as_attachment=True,
-            mimetype='application/json'
+            mimetype='application/json',
         )
-    
+
     except Exception as e:
-        current_app.logger.error(f"💥 Falló descarga raw: {e}")
-        return {"message": "Error bajando raw survey"}, 500
+        logger.error('Error bajando raw cuarto survey: %s', str(e), exc_info=True)
+        return jsonify({'message': 'Error bajando raw survey'}), 500

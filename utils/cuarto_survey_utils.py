@@ -1,501 +1,447 @@
-from openai import OpenAI
-import requests
-from bs4 import BeautifulSoup
-import re
-import pandas as pd
-from io import BytesIO
-from database import db
-from models import CuartoSurvey
-from sqlalchemy.exc import SQLAlchemyError
-from datetime import datetime
-from io import BytesIO
-import pytz
-from dotenv import load_dotenv
-load_dotenv()
 import os
-from logging_config import logger
+import re
 import gc
 from datetime import datetime
-# Zona horaria de São Paulo/Buenos Aires
+from io import BytesIO
+
+import pandas as pd
+import pytz
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from dotenv import load_dotenv
+from sqlalchemy.exc import SQLAlchemyError
+
+from database import db
+from models import CuartoSurvey
+from logging_config import logger
+
+load_dotenv()
+
 tz = pytz.timezone('America/Sao_Paulo')
 
-# - Creando cliente openai
-client = OpenAI(
-    api_key=os.environ.get("OPENAI_API_KEY"),
-    organization="org-cSBk1UaTQMh16D7Xd9wjRUYq"
-)
+
+# Fallback usado por tu ruta raw vieja. Si despues lo pasas a .env, mejor.
+DEFAULT_FOURTH_SURVEY_ID = '514508354'
 
 
+def build_surveymonkey_session(access_token):
+    session = requests.Session()
 
-# -----------------------------------En esta versión J , K y T tiene valores, pero N, O, P y Q no : 
+    retry = Retry(
+        total=4,
+        connect=3,
+        read=3,
+        status=4,
+        backoff_factor=1,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(['GET']),
+        raise_on_status=False,
+    )
 
-# def clean_html(raw_html):
-#     """
-#     Elimina tags HTML de un string y devuelve texto limpio.
-#     Sólo analiza con BeautifulSoup si detecta etiquetas '<' o '>'.
-#     """
-#     if not isinstance(raw_html, str):
-#         return raw_html
-#     if '<' not in raw_html and '>' not in raw_html:
-#         return raw_html
-#     return BeautifulSoup(raw_html, "html.parser").get_text()
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount('https://', adapter)
+    session.mount('http://', adapter)
 
+    session.headers.update({
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json',
+    })
 
-# def obtener_y_guardar_cuarto_survey():
-#     """
-#     Descarga respuestas de SurveyMonkey, procesa datos y guarda resultado en DB.
-#     Identifica directamente por qid las columnas J, K y T para asegurar valores correctos.
-#     """
-#     print("[0] Inicio de obtener_y_guardar_cuarto_survey")
-#     access_token = os.getenv('SURVEYMONKEY_ACCESS_TOKEN')
-#     survey_id    = '514508354'
-#     headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
-#     HOST = "https://api.surveymonkey.com"
-#     DETS = f"/v3/surveys/{survey_id}/details"
-#     BULK = f"/v3/surveys/{survey_id}/responses/bulk"
-#     t0 = datetime.now()
-
-#     # Paso 1: detalles
-#     print("[1] Obteniendo detalles...")
-#     det = requests.get(f"{HOST}{DETS}", headers=headers).json()
-#     print(f"[1] {len(det.get('pages', []))} páginas de preguntas")
-
-#     # Paso 2: construir maps
-#     question_map = {}  # qid -> heading
-#     choice_map = {}    # choice_id -> texto
-#     for page in det.get('pages', []):
-#         for q in page.get('questions', []):
-#             qid = q['id']
-#             heading = clean_html(q['headings'][0]['heading'])
-#             question_map[qid] = heading
-#             for ch in q.get('answers', {}).get('choices', []):
-#                 choice_map[ch['id']] = clean_html(ch['text'])
-#     print(f"[2] question_map={len(question_map)}, choice_map={len(choice_map)}")
-
-#     # Identificar qids de J, K, T por contenido en heading
-#     j_qid = next((qid for qid,h in question_map.items() if 'recomiende este curso' in h), None)
-#     k_qid = next((qid for qid,h in question_map.items() if 'calificarías a este curso' in h), None)
-#     t_qid = next((qid for qid,h in question_map.items() if 'experiencia de aprendizaje' in h), None)
-#     print(f"[2] J_qid={j_qid}, K_qid={k_qid}, T_qid={t_qid}")
-
-#     # Paso 3: descargar respuestas
-#     print("[3] Descargando respuestas...")
-#     all_resp = []
-#     url = f"{HOST}{BULK}?per_page=1000"
-#     pg = 1
-#     while url:
-#         batch = requests.get(url, headers=headers).json()
-#         data = batch.get('data', [])
-#         all_resp.extend(data)
-#         print(f"[3] página {pg}: {len(data)} respuestas, total={len(all_resp)}")
-#         url = batch.get('links', {}).get('next')
-#         pg += 1
-#     print(f"[3] Total respuestas={len(all_resp)}")
-
-#     # Paso 4: preparar registros
-#     print("[4] Procesando respuestas...")
-#     desired_cols = [
-#         'respondent_id','collector_id','date_created','date_modified','ip_address',
-#         'email_address','first_name','last_name','custom_1',
-#         '¿Qué tan probable es que usted le recomiende este curso a un colega?',
-#         'En líneas generales, ¿cómo calificarías a este curso/ actividad?',
-#         'Pensando en los contenidos vistos, considerás que la duración del curso fue:',
-#         'En cuanto a la información recibida, considerás que es:',
-#         'Los temas fueron tratados con claridad',
-#         'El contenido visto es de utilidad para mi tarea',
-#         'Las explicaciones, guías, videos, etc. ayudan a poner en práctica lo visto en el curso',
-#         'Las actividades propuestas refuerzan lo aprendido',
-#         'Al momento de realizar el curso, ¿tuviste algún problema con el Campus de aprendizaje?',
-#         'Si tuviste algún problema, por favor, contanos que sucedió',
-#         'En líneas generales dirías que tu experiencia de aprendizaje con este curso fue:',
-#         'Para finalizar dejamos este espacio para que nos dejes tus sugerencias o comentarios relacionados a este curso',
-#         'ID_CODE'
-#     ]
-#     records = []
-
-#     for resp in all_resp:
-#         # base
-#         cv = resp.get('custom_variables', {})
-#         base = {
-#             'respondent_id': resp.get('id'),
-#             'collector_id': resp.get('collector_id'),
-#             'date_created': resp.get('date_created','')[:10],
-#             'date_modified': resp.get('date_modified'),
-#             'ip_address': resp.get('ip_address'),
-#             'email_address': resp.get('email_address'),
-#             'first_name': resp.get('first_name'),
-#             'last_name': resp.get('last_name'),
-#             'custom_1': cv.get('1',''),
-#             'ID_CODE': cv.get('ID_CODE','')
-#         }
-#         # iniciar record con base
-#         rec = {col: base.get(col) for col in desired_cols}
-#         # llenar J, K, T desde qids directos
-#         for page in resp.get('pages', []):
-#             for q in page.get('questions', []):
-#                 qid = q.get('id')
-#                 for ans in q.get('answers', []):
-#                     # J: likelihood
-#                     if qid == j_qid:
-#                         rec['¿Qué tan probable es que usted le recomiende este curso a un colega?'] = choice_map.get(ans.get('choice_id'), clean_html(ans.get('text','')))
-#                     # K: general rating
-#                     elif qid == k_qid:
-#                         rec['En líneas generales, ¿cómo calificarías a este curso/ actividad?'] = choice_map.get(ans.get('choice_id'), clean_html(ans.get('text','')))
-#                     # T: learning experience
-#                     elif qid == t_qid:
-#                         rec['En líneas generales dirías que tu experiencia de aprendizaje con este curso fue:'] = choice_map.get(ans.get('choice_id'), clean_html(ans.get('text','')))
-#                     # luego matrices y resto (ya tenías implementado)
-#         # procesar matrices y otras simples
-#         for page in resp.get('pages', []):
-#             for q in page.get('questions', []):
-#                 qid = q.get('id')
-#                 if qid not in {j_qid, k_qid, t_qid}:
-#                     heading = question_map.get(qid)
-#                     # matrix
-#                     if heading not in desired_cols:
-#                         continue
-#                     for ans in q.get('answers', []):
-#                         rec[heading] = choice_map.get(ans.get('choice_id'), clean_html(ans.get('text','')))
-#         records.append(rec)
-#     print(f"[4] Records preparados={len(records)}")
-
-#     # Paso 5: DataFrame y guardado
-#     print("[5] Creando DataFrame...")
-#     df = pd.DataFrame.from_records(records, columns=desired_cols)
-#     print(f"[5] DataFrame shape={df.shape}")
-
-#     print("[6] Guardando en DB...")
-#     with BytesIO() as buf:
-#         df.to_pickle(buf)
-#         data_blob = buf.getvalue()
-#     db.session.query(CuartoSurvey).delete()
-#     db.session.add(CuartoSurvey(data=data_blob))
-#     db.session.commit()
-
-#     gc.collect()
-#     print(f"[7] Completado en {datetime.now() - t0}")
+    return session
 
 
-# ------------------------En esta versión N, O, P y Q tiene valores, pero J , Q y T no : 
+def get_json_or_raise(session, url, params=None, context='request'):
+    response = session.get(url, params=params, timeout=(10, 60))
 
-# def clean_html(raw_html):
-#     """
-#     Elimina tags HTML de un string y devuelve texto limpio.
-#     Sólo analiza con BeautifulSoup si detecta etiquetas '<' o '>'.
-#     """
-#     if not isinstance(raw_html, str):
-#         return raw_html
-#     if '<' not in raw_html and '>' not in raw_html:
-#         return raw_html
-#     return BeautifulSoup(raw_html, "html.parser").get_text()
+    if response.status_code != 200:
+        body_preview = response.text[:1000] if response.text else ''
+        raise RuntimeError(
+            f'Error en {context}: status={response.status_code}, body={body_preview}'
+        )
 
-
-# def obtener_y_guardar_cuarto_survey():
-#     """
-#     Descarga respuestas de SurveyMonkey, procesa datos y guarda resultado en DB.
-#     Llena correctamente columnas J, K, T (simples) y N-Q (subpreguntas de matriz).
-#     """
-#     print("[0] Inicio de obtener_y_guardar_cuarto_survey")
-#     access_token = os.getenv('SURVEYMONKEY_ACCESS_TOKEN')
-#     survey_id    = '514508354'
-#     headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
-#     base_url = "https://api.surveymonkey.com"
-#     dets_url = f"{base_url}/v3/surveys/{survey_id}/details"
-#     bulk_url = f"{base_url}/v3/surveys/{survey_id}/responses/bulk"
-#     t0 = datetime.now()
-
-#     # 1) Obtener detalles y construir mapas
-#     print("[1] Obteniendo detalles...")
-#     det = requests.get(dets_url, headers=headers).json()
-#     question_map = {}   # qid -> heading (para simples)
-#     matrix_map   = {}   # qid -> { row_id: row_text }
-#     choice_map   = {}   # choice_id -> texto
-
-#     for page in det.get('pages', []):
-#         for q in page.get('questions', []):
-#             qid = q['id']
-#             heading = clean_html(q['headings'][0]['heading'])
-#             # mapear options
-#             for ch in q.get('answers', {}).get('choices', []):
-#                 choice_map[ch['id']] = clean_html(ch['text'])
-#             # filas de matriz
-#             rows = q.get('answers', {}).get('rows', [])
-#             if rows:
-#                 matrix_map[qid] = {r['id']: clean_html(r['text']) for r in rows}
-#             else:
-#                 question_map[qid] = heading
-#     print(f"[1] question_map={len(question_map)}, matrix_map={len(matrix_map)}, choice_map={len(choice_map)}")
-
-#     # detectar qids de columnas simples J, K, T
-#     inv_qmap = {v:k for k,v in question_map.items()}
-#     j_heading = '¿Qué tan probable es que usted le recomiende este curso a un colega?'
-#     k_heading = 'En líneas generales, ¿cómo calificarías a este curso/ actividad?'
-#     t_heading = 'En líneas generales dirías que tu experiencia de aprendizaje con este curso fue:'
-#     j_qid = inv_qmap.get(j_heading)
-#     k_qid = inv_qmap.get(k_heading)
-#     t_qid = inv_qmap.get(t_heading)
-#     print(f"[1] J_qid={j_qid}, K_qid={k_qid}, T_qid={t_qid}")
-
-#     # columnas deseadas
-#     desired_cols = [
-#         'respondent_id','collector_id','date_created','date_modified','ip_address',
-#         'email_address','first_name','last_name','custom_1',
-#         j_heading, k_heading,
-#         'Pensando en los contenidos vistos, considerás que la duración del curso fue:',
-#         'En cuanto a la información recibida, considerás que es:',
-#         'Los temas fueron tratados con claridad',
-#         'El contenido visto es de utilidad para mi tarea',
-#         'Las explicaciones, guías, videos, etc. ayudan a poner en práctica lo visto en el curso',
-#         'Las actividades propuestas refuerzan lo aprendido',
-#         'Al momento de realizar el curso, ¿tuviste algún problema con el Campus de aprendizaje?',
-#         'Si tuviste algún problema, por favor, contanos que sucedió',
-#         t_heading,
-#         'Para finalizar dejamos este espacio para que nos dejes tus sugerencias o comentarios relacionados a este curso',
-#         'ID_CODE'
-#     ]
-
-#     # 2) Descargar respuestas
-#     print("[2] Descargando respuestas...")
-#     all_resp = []
-#     url = f"{bulk_url}?per_page=1000"
-#     page = 1
-#     while url:
-#         batch = requests.get(url, headers=headers).json()
-#         data = batch.get('data', [])
-#         all_resp.extend(data)
-#         print(f"[2] página {page}: {len(data)} respuestas")
-#         url = batch.get('links', {}).get('next')
-#         page += 1
-#     print(f"[2] Total respuestas={len(all_resp)}")
-
-#     # 3) Procesar registros
-#     print("[3] Procesando registros...")
-#     records = []
-#     for resp in all_resp:
-#         cv = resp.get('custom_variables', {})
-#         base = {
-#             'respondent_id': resp.get('id'),
-#             'collector_id': resp.get('collector_id'),
-#             'date_created': resp.get('date_created','')[:10],
-#             'date_modified': resp.get('date_modified'),
-#             'ip_address': resp.get('ip_address'),
-#             'email_address': resp.get('email_address'),
-#             'first_name': resp.get('first_name'),
-#             'last_name': resp.get('last_name'),
-#             'custom_1': cv.get('1',''),
-#             'ID_CODE': cv.get('ID_CODE','')
-#         }
-#         rec = {col: base.get(col) for col in desired_cols}
-#         # Lectura de respuestas
-#         for pg_obj in resp.get('pages', []):
-#             for q in pg_obj.get('questions', []):
-#                 qid = q.get('id')
-#                 # preguntas simples J,K,T y otras simples
-#                 if qid in question_map:
-#                     heading = question_map[qid]
-#                     if heading in desired_cols:
-#                         for ans in q.get('answers', []):
-#                             rec[heading] = choice_map.get(ans.get('choice_id'), clean_html(ans.get('text','')))
-#                 # matrix N/Q
-#                 elif qid in matrix_map:
-#                     for ans in q.get('answers', []):
-#                         row_id = ans.get('row_id')
-#                         colname = matrix_map[qid].get(row_id)
-#                         if colname in desired_cols:
-#                             rec[colname] = choice_map.get(ans.get('choice_id'), clean_html(ans.get('text','')))
-#         records.append(rec)
-#     print(f"[3] Registros procesados={len(records)}")
-
-#     # 4) Crear DataFrame y guardar
-#     print("[4] Creando DataFrame...")
-#     df = pd.DataFrame.from_records(records, columns=desired_cols)
-#     print(f"[4] DataFrame shape={df.shape}")
-
-#     print("[5] Serializando y guardando en DB...")
-#     with BytesIO() as buf:
-#         df.to_pickle(buf)
-#         data_blob = buf.getvalue()
-#     db.session.query(CuartoSurvey).delete()
-#     db.session.add(CuartoSurvey(data=data_blob))
-#     db.session.commit()
-
-#     gc.collect()
-#     print(f"[6] Completado en {datetime.now() - t0}")
+    try:
+        return response.json()
+    except ValueError as e:
+        raise RuntimeError(f'Respuesta no JSON en {context}: {str(e)}') from e
 
 
-    # ----------------------------------nuevo test :
+def extract_text_from_html(html_text):
+    if not isinstance(html_text, str):
+        return html_text
+    return re.sub(r'<[^>]*>', '', html_text).strip()
 
-def clean_html(raw_html):
+
+def safe_text(value, fallback=''):
+    if value is None:
+        return fallback
+    value = extract_text_from_html(value)
+    return str(value).strip()
+
+
+def put_answer(target, column_key, value):
+    if value is None:
+        return
+
+    if isinstance(value, str):
+        value = value.strip()
+        if value == '':
+            return
+
+    if column_key not in target or target[column_key] in (None, ''):
+        target[column_key] = value
+        return
+
+    existing = target[column_key]
+
+    if isinstance(existing, list):
+        existing.append(value)
+        return
+
+    target[column_key] = [existing, value]
+
+
+def normalize_multi_answers(row):
+    for key, value in list(row.items()):
+        if isinstance(value, list):
+            row[key] = ' | '.join(str(item) for item in value)
+
+
+def make_unique_columns(columns):
     """
-    Elimina tags HTML de un string y devuelve texto limpio.
-    Sólo analiza con BeautifulSoup si detecta tags HTML.
+    Evita columnas duplicadas si SurveyMonkey tiene headings repetidos.
+    Excel y pandas toleran duplicados, pero despues depurar eso es un picnic en Mordor.
     """
-    if not isinstance(raw_html, str):
-        return raw_html
-    if '<' not in raw_html and '>' not in raw_html:
-        return raw_html
-    return BeautifulSoup(raw_html, 'html.parser').get_text()
+    used = {}
+    unique = []
+
+    for col in columns:
+        base = safe_text(col, fallback='sin_nombre') or 'sin_nombre'
+        count = used.get(base, 0)
+
+        if count == 0:
+            unique.append(base)
+        else:
+            unique.append(f'{base} ({count + 1})')
+
+        used[base] = count + 1
+
+    return unique
 
 
-def obtener_y_guardar_cuarto_survey():
+def get_heading(question):
+    headings = question.get('headings', [])
+    if headings and isinstance(headings, list):
+        heading = headings[0].get('heading')
+        if heading:
+            return safe_text(heading)
+    return safe_text(question.get('id'), fallback='pregunta_sin_id')
+
+
+def build_survey_maps(survey_details):
     """
-    Descarga respuestas de SurveyMonkey, procesa y garantiza que todas las columnas
-    (J, K, T, N-Q) queden pobladas correctamente, luego guarda en DB.
+    Arma mapas para preguntas simples, opciones y matrices.
+
+    Para matrices usamos una columna por fila:
+    "Pregunta - Texto de fila" => "Texto de opcion elegida".
+    Eso respeta la estructura logica del cuarto survey sin meter el formato del segundo.
     """
-    print('[0] Inicio de obtener_y_guardar_cuarto_survey')
-    token = os.getenv('SURVEYMONKEY_ACCESS_TOKEN')
-    survey_id = '514508354'
-    headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
-    base_url = 'https://api.surveymonkey.com'
-    details_url = f'{base_url}/v3/surveys/{survey_id}/details'
-    bulk_url = f'{base_url}/v3/surveys/{survey_id}/responses/bulk'
-    start = datetime.now()
+    choice_map = {}
+    question_map = {}
+    row_map = {}
+    matrix_column_map = {}
 
-    # Definir encabezados y orden de columnas
-    hdr_j = '¿Qué tan probable es que usted le recomiende este curso a un colega?'
-    hdr_k = 'En líneas generales, ¿cómo calificarías a este curso/ actividad?'
-    hdr_dur = 'Pensando en los contenidos vistos, considerás que la duración del curso fue:'
-    hdr_inf = 'En cuanto a la información recibida, considerás que es:'
-    hdr_n = 'Los temas fueron tratados con claridad'
-    hdr_o = 'El contenido visto es de utilidad para mi tarea'
-    hdr_p = 'Las explicaciones, guías, videos, etc. ayudan a poner en práctica lo visto en el curso'
-    hdr_q = 'Las actividades propuestas refuerzan lo aprendido'
-    hdr_t = 'En líneas generales dirías que tu experiencia de aprendizaje con este curso fue:'
-    cols = [
-        'respondent_id','collector_id','date_created','date_modified','ip_address',
-        'email_address','first_name','last_name','custom_1',
-        hdr_j, hdr_k, hdr_dur, hdr_inf,
-        hdr_n, hdr_o, hdr_p, hdr_q,
-        'Al momento de realizar el curso, ¿tuviste algún problema con el Campus de aprendizaje?',
-        'Si tuviste algún problema, por favor, contanos que sucedió',
-        hdr_t,
-        'Para finalizar dejamos este espacio para que nos dejes tus sugerencias o comentarios relacionados a este curso',
-        'ID_CODE'
-    ]
+    simple_questions = 0
+    matrix_questions = 0
 
-    # 1) Obtener detalles y construir mapas
-    print('[1] Obteniendo detalles de preguntas')
-    det = requests.get(details_url, headers=headers).json()
-    question_map = {}    # qid -> heading (preguntas simples)
-    matrix_map = {}      # qid -> {row_id: row_text} (subpreguntas)
-    choice_map = {}      # choice_id -> texto
-    # conjunto de preguntas simples forzadas
-    forced_simple = {hdr_j, hdr_k, hdr_t}
-    for page in det.get('pages', []):
-        for q in page.get('questions', []):
-            qid = q['id']
-            heading = clean_html(q['headings'][0]['heading'])
-            # registrar opciones
-            for ch in q.get('answers', {}).get('choices', []):
-                choice_map[ch['id']] = clean_html(ch['text'])
-            # detectar matriz vs simple, pero forzar simples para J, K, T
-            rows = q.get('answers', {}).get('rows', [])
-            if rows and heading not in forced_simple:
-                matrix_map[qid] = {r['id']: clean_html(r['text']) for r in rows}
+    for page in survey_details.get('pages', []):
+        for question in page.get('questions', []):
+            question_id = question.get('id')
+            if not question_id:
+                continue
+
+            heading = get_heading(question)
+            question_map[question_id] = heading
+
+            answers = question.get('answers', {}) or {}
+            choices = answers.get('choices', []) or []
+            rows = answers.get('rows', []) or []
+            cols = answers.get('cols', []) or []
+
+            for choice in choices:
+                choice_id = choice.get('id')
+                choice_text = choice.get('text') or choice.get('visible') or choice.get('label')
+                if choice_id:
+                    choice_map[choice_id] = safe_text(choice_text, fallback=choice_id)
+
+            # Algunas matrices guardan las columnas como cols en lugar de choices.
+            for col in cols:
+                col_id = col.get('id')
+                col_text = col.get('text') or col.get('visible') or col.get('label')
+                if col_id:
+                    choice_map[col_id] = safe_text(col_text, fallback=col_id)
+
+            if rows:
+                matrix_questions += 1
+                for row in rows:
+                    row_id = row.get('id')
+                    row_text = row.get('text') or row.get('visible') or row.get('label')
+                    if not row_id:
+                        continue
+
+                    clean_row_text = safe_text(row_text, fallback=row_id)
+                    row_map[row_id] = clean_row_text
+                    matrix_column_map[(question_id, row_id)] = f'{heading} - {clean_row_text}'
             else:
-                question_map[qid] = heading
-    print(f"[1] Mapas: {len(question_map)} simples, {len(matrix_map)} matrices, {len(choice_map)} opciones")
-    hdr_j = '¿Qué tan probable es que usted le recomiende este curso a un colega?'
-    hdr_k = 'En líneas generales, ¿cómo calificarías a este curso/ actividad?'
-    hdr_dur = 'Pensando en los contenidos vistos, considerás que la duración del curso fue:'
-    hdr_inf = 'En cuanto a la información recibida, considerás que es:'
-    hdr_n = 'Los temas fueron tratados con claridad'
-    hdr_o = 'El contenido visto es de utilidad para mi tarea'
-    hdr_p = 'Las explicaciones, guías, videos, etc. ayudan a poner en práctica lo visto en el curso'
-    hdr_q = 'Las actividades propuestas refuerzan lo aprendido'
-    hdr_t = 'En líneas generales dirías que tu experiencia de aprendizaje con este curso fue:'
-    cols = [
-        'respondent_id','collector_id','date_created','date_modified','ip_address',
-        'email_address','first_name','last_name','custom_1',
-        hdr_j, hdr_k, hdr_dur, hdr_inf,
-        hdr_n, hdr_o, hdr_p, hdr_q,
-        'Al momento de realizar el curso, ¿tuviste algún problema con el Campus de aprendizaje?',
-        'Si tuviste algún problema, por favor, contanos que sucedió',
-        hdr_t,
-        'Para finalizar dejamos este espacio para que nos dejes tus sugerencias o comentarios relacionados a este curso',
-        'ID_CODE'
-    ]
+                simple_questions += 1
 
-    # 2) Descargar respuestas bulk
-    print('[2] Descargando respuestas')
-    all_resp = []
-    url = f'{bulk_url}?per_page=1000'
-    page_num = 1
-    while url:
-        batch = requests.get(url, headers=headers).json()
-        data = batch.get('data', [])
-        print(f"[2] Página {page_num}: {len(data)} items")
-        all_resp.extend(data)
-        url = batch.get('links', {}).get('next')
-        page_num += 1
-    print(f"[2] Total respuestas: {len(all_resp)}")
+    return {
+        'choice_map': choice_map,
+        'question_map': question_map,
+        'row_map': row_map,
+        'matrix_column_map': matrix_column_map,
+        'simple_questions': simple_questions,
+        'matrix_questions': matrix_questions,
+    }
 
-    # 3) Procesar respuestas en registros
-    print('[3] Procesando registros')
-    records = []
-    for resp in all_resp:
-        cv = resp.get('custom_variables', {})
-        base = {
-            'respondent_id': resp.get('id'),
-            'collector_id': resp.get('collector_id'),
-            'date_created': resp.get('date_created','')[:10],
-            'date_modified': resp.get('date_modified'),
-            'ip_address': resp.get('ip_address'),
-            'email_address': resp.get('email_address'),
-            'first_name': resp.get('first_name'),
-            'last_name': resp.get('last_name'),
-            'custom_1': cv.get('1',''),
-            'ID_CODE': cv.get('ID_CODE','')
+
+def get_answer_value(answer, choice_map, row_map):
+    text = answer.get('text')
+    choice_id = answer.get('choice_id')
+    col_id = answer.get('col_id')
+    row_id = answer.get('row_id')
+
+    choice_label = None
+    if choice_id:
+        choice_label = choice_map.get(choice_id, choice_id)
+    elif col_id:
+        choice_label = choice_map.get(col_id, col_id)
+
+    # Caso "Otro": viene opcion + texto. Guardamos ambas cosas para no perder info.
+    if text not in (None, '') and choice_label:
+        return f'{choice_label}: {safe_text(text)}'
+
+    if text not in (None, ''):
+        return safe_text(text)
+
+    if choice_label:
+        return choice_label
+
+    # Si solo vino row_id, al menos no perdemos el dato.
+    if row_id:
+        return row_map.get(row_id, row_id)
+
+    return None
+
+
+def get_column_key(question_id, answer, matrix_column_map):
+    row_id = answer.get('row_id')
+
+    if row_id and (question_id, row_id) in matrix_column_map:
+        return f'{question_id}__row__{row_id}'
+
+    return question_id
+
+
+def obtener_y_guardar_cuarto_survey(job_id=None):
+    access_token = os.getenv('SURVEYMONKEY_ACCESS_TOKEN')
+    survey_id = (
+        os.getenv('FOURTH_SURVEY_ID')
+        or os.getenv('CUARTO_SURVEY_ID')
+        or os.getenv('FOURTH_SURVEYMONKEY_ID')
+        or DEFAULT_FOURTH_SURVEY_ID
+    )
+
+    if not access_token:
+        raise RuntimeError('Falta SURVEYMONKEY_ACCESS_TOKEN en variables de entorno')
+
+    if not survey_id:
+        raise RuntimeError('Falta FOURTH_SURVEY_ID / CUARTO_SURVEY_ID en variables de entorno')
+
+    hora_inicio = datetime.now()
+    logger.info('2 - Iniciando recuperacion del cuarto survey. job_id=%s survey_id=%s', job_id, survey_id)
+
+    host = 'https://api.surveymonkey.com'
+    survey_responses_url = f'{host}/v3/surveys/{survey_id}/responses/bulk'
+    survey_details_url = f'{host}/v3/surveys/{survey_id}/details'
+
+    session = build_surveymonkey_session(access_token)
+
+    logger.info('3 - Obteniendo detalles del cuarto survey. job_id=%s', job_id)
+    survey_details = get_json_or_raise(session, survey_details_url, context='cuarto survey details')
+
+    maps = build_survey_maps(survey_details)
+    choice_map = maps['choice_map']
+    question_map = maps['question_map']
+    row_map = maps['row_map']
+    matrix_column_map = maps['matrix_column_map']
+
+    logger.info(
+        '4 - Mapeos cuarto survey cargados. job_id=%s simples=%s matrices=%s opciones=%s filas_matriz=%s',
+        job_id,
+        maps['simple_questions'],
+        maps['matrix_questions'],
+        len(choice_map),
+        len(row_map),
+    )
+
+    logger.info('5 - Obteniendo respuestas del cuarto survey. job_id=%s', job_id)
+
+    page = 1
+    per_page = 1000
+    all_responses = []
+    next_url = survey_responses_url
+    params = {'page': page, 'per_page': per_page}
+
+    while next_url:
+        logger.info('5.%s - Bajando pagina SurveyMonkey cuarto survey. job_id=%s', page, job_id)
+
+        response_json = get_json_or_raise(
+            session,
+            next_url,
+            params=params,
+            context=f'cuarto survey responses bulk page {page}',
+        )
+
+        responses_page = response_json.get('data', [])
+
+        if not isinstance(responses_page, list):
+            raise RuntimeError(f'Formato inesperado en pagina {page}: data no es lista')
+
+        logger.info(
+            '5.%s - Pagina recibida cuarto survey. job_id=%s respuestas=%s acumuladas=%s',
+            page,
+            job_id,
+            len(responses_page),
+            len(all_responses) + len(responses_page),
+        )
+
+        if not responses_page:
+            break
+
+        all_responses.extend(responses_page)
+
+        next_link = response_json.get('links', {}).get('next')
+
+        if next_link:
+            next_url = next_link
+            params = None
+            page += 1
+        else:
+            break
+
+    if not all_responses:
+        raise RuntimeError('SurveyMonkey no devolvio respuestas para el cuarto survey. No se pisa la DB con un dataset vacio.')
+
+    logger.info('6 - Procesando respuestas cuarto survey. job_id=%s total_respuestas=%s', job_id, len(all_responses))
+
+    rows = []
+
+    for response in all_responses:
+        respondent_id = response.get('id')
+        if not respondent_id:
+            continue
+
+        row = {
+            'response_id': respondent_id,
+            'custom_variables': '',
+            'STORE_CODE': '',
+            'date_created': response.get('date_created', '')[:10],
         }
-        rec = {c: base.get(c) for c in cols}
-        # Completar respuestas
-        for page_obj in resp.get('pages', []):
-            for question_item in page_obj.get('questions', []):
-                qid = question_item.get('id')
-                # Pregunta simple (incluyendo j, k, t)
-                if qid in question_map:
-                    hd = question_map[qid]
-                    if hd in rec:
-                        for ans in question_item.get('answers', []):
-                            if 'choice_id' in ans:
-                                rec[hd] = choice_map.get(ans['choice_id'], '')
-                            elif 'text' in ans:
-                                rec[hd] = clean_html(ans['text'])
-                # Subpregunta matriz (n, o, p, q)
-                if qid in matrix_map:
-                    for ans in question_item.get('answers', []):
-                        row_id = ans.get('row_id')
-                        hd = matrix_map[qid].get(row_id)
-                        if hd in rec:
-                            if 'choice_id' in ans:
-                                rec[hd] = choice_map.get(ans['choice_id'], '')
-                            elif 'text' in ans:
-                                rec[hd] = clean_html(ans['text'])
-        records.append(rec)
-    print(f"[3] Registros preparados: {len(records)}")
 
-    # 4) Crear DataFrame y guardar en DB
-    print('[4] Creando DataFrame y guardando en DB')
-    df = pd.DataFrame.from_records(records, columns=cols)
+        custom_vars = response.get('custom_variables', {}) or {}
+        row['custom_variables'] = custom_vars.get('ID_CODE', '')
+        row['STORE_CODE'] = custom_vars.get('STORE_CODE', '')
 
-    # ————— Aquí metés tu llamada —————
-    import io
-    from utils.rescate_utils import procesar_encuestas_ac
+        # Dejamos disponibles tambien las custom vars extra, por si el cuarto survey trae otros nombres.
+        for custom_key, custom_value in custom_vars.items():
+            if custom_key not in ('ID_CODE', 'STORE_CODE'):
+                row[f'custom_{custom_key}'] = custom_value
 
-    # Convertimos el df a CSV en un BytesIO y lo pasamos a procesar_encuestas_ac
-    csv_buffer = io.BytesIO()
-    csv_buffer.write(df.to_csv(index=False).encode('utf-8'))
-    csv_buffer.seek(0)
-    procesar_encuestas_ac(csv_buffer)
-    logger.info("🔌 procesar_encuestas_ac terminó correctamente")
-    # ————————————————————————————
+        for page_data in response.get('pages', []):
+            for question in page_data.get('questions', []):
+                question_id = question.get('id')
+                if not question_id:
+                    continue
 
-    with BytesIO() as buf:
-        df.to_pickle(buf)
-        blob = buf.getvalue()
-    db.session.query(CuartoSurvey).delete()
-    db.session.add(CuartoSurvey(data=blob))
-    db.session.commit()
+                for answer in question.get('answers', []):
+                    column_key = get_column_key(question_id, answer, matrix_column_map)
+                    value = get_answer_value(answer, choice_map, row_map)
+                    put_answer(row, column_key, value)
+
+        normalize_multi_answers(row)
+        rows.append(row)
+
+    all_responses = []
+    df_responses = pd.DataFrame(rows)
+
+    if df_responses.empty:
+        raise RuntimeError('El DataFrame final del cuarto survey quedo vacio. No se pisa la DB.')
+
+    rename_map = {}
+    for col in df_responses.columns:
+        if '__row__' in str(col):
+            question_id, row_id = str(col).split('__row__', 1)
+            rename_map[col] = matrix_column_map.get((question_id, row_id), col)
+        else:
+            rename_map[col] = question_map.get(col, col)
+
+    df_responses.rename(columns=rename_map, inplace=True)
+    df_responses.columns = make_unique_columns(df_responses.columns)
+
+    logger.info(
+        '7 - DataFrame cuarto survey listo. job_id=%s filas=%s columnas=%s',
+        job_id,
+        df_responses.shape[0],
+        df_responses.shape[1],
+    )
+
+    with BytesIO() as output:
+        df_responses.to_pickle(output)
+        binary_data = output.getvalue()
+
+    binary_size_bytes = len(binary_data)
+
+    if binary_size_bytes <= 0:
+        raise RuntimeError('El binario generado del cuarto survey esta vacio. No se pisa la DB.')
+
+    logger.info(
+        '8 - Guardando cuarto survey en DB. job_id=%s binary_size_bytes=%s',
+        job_id,
+        binary_size_bytes,
+    )
+
+    try:
+        db.session.query(CuartoSurvey).delete()
+        db.session.flush()
+
+        new_survey = CuartoSurvey(data=binary_data)
+        db.session.add(new_survey)
+        db.session.commit()
+
+    except SQLAlchemyError as e:
+        db.session.rollback()
+        raise RuntimeError(f'Error SQLAlchemy guardando cuarto survey: {str(e)}') from e
+
+    elapsed_time = datetime.now() - hora_inicio
+
+    logger.info(
+        '9 - Cuarto survey guardado correctamente. job_id=%s record_id=%s filas=%s columnas=%s tiempo=%s',
+        job_id,
+        new_survey.id,
+        df_responses.shape[0],
+        df_responses.shape[1],
+        str(elapsed_time),
+    )
+
+    result = {
+        'record_id': new_survey.id,
+        'rows': int(df_responses.shape[0]),
+        'columns': int(df_responses.shape[1]),
+        'binary_size_bytes': int(binary_size_bytes),
+        'elapsed_time': str(elapsed_time),
+    }
 
     gc.collect()
-    print(f"[5] Finalizado en {datetime.now() - start}")
+
+    return result
