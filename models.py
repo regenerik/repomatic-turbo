@@ -1021,3 +1021,100 @@ class Instructions(db.Model):
             "instructions": self.instructions,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+
+
+
+
+# ============================================================
+# ARCHIVOS RECUPERADOS DESDE GOOGLE DRIVE
+# ============================================================
+
+class DriveFileDownload(db.Model):
+    __tablename__ = 'drive_file_download'
+
+    id = db.Column(db.Integer, primary_key=True)
+
+    # Identificador público del proceso asíncrono
+    job_id = db.Column(
+        db.String(36),
+        unique=True,
+        nullable=False,
+        index=True
+    )
+
+    # ID real del archivo de Google Drive
+    drive_file_id = db.Column(
+        db.String(255),
+        nullable=False
+    )
+
+    # URL original de Google Drive
+    source_url = db.Column(
+        db.Text,
+        nullable=False
+    )
+
+    # Nombre que tendrá el archivo descargado
+    file_name = db.Column(
+        db.String(255),
+        nullable=True
+    )
+
+    # queued | running | completed | failed
+    status = db.Column(
+        db.String(30),
+        nullable=False,
+        default='queued'
+    )
+
+    # Excel final guardado como binario
+    data = db.Column(
+        db.LargeBinary,
+        nullable=True
+    )
+
+    # Tamaño final
+    size_bytes = db.Column(
+        db.BigInteger,
+        nullable=True
+    )
+
+    # Si explota algo, queda guardado acá
+    error = db.Column(
+        db.Text,
+        nullable=True
+    )
+
+    created_at = db.Column(
+        db.DateTime,
+        default=datetime.utcnow,
+        nullable=False
+    )
+
+    started_at = db.Column(
+        db.DateTime,
+        nullable=True
+    )
+
+    finished_at = db.Column(
+        db.DateTime,
+        nullable=True
+    )
+
+    def serialize(self):
+        return {
+            "id": self.id,
+            "job_id": self.job_id,
+            "drive_file_id": self.drive_file_id,
+            "source_url": self.source_url,
+            "file_name": self.file_name,
+            "status": self.status,
+            "size_bytes": self.size_bytes,
+            "error": self.error,
+            "created_at": self.created_at.isoformat()
+                if self.created_at else None,
+            "started_at": self.started_at.isoformat()
+                if self.started_at else None,
+            "finished_at": self.finished_at.isoformat()
+                if self.finished_at else None
+        }
