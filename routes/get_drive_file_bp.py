@@ -245,11 +245,10 @@ def descargar_drive_file():
 
         # ----------------------------------------------------
         # Listo. Entregamos exactamente los bytes XLSX
-        # descargados desde Google.
+        # exportados desde Google Drive.
         # ----------------------------------------------------
 
         buffer = BytesIO(job.data)
-
         buffer.seek(0)
 
         logger.info(
@@ -283,3 +282,4 @@ def descargar_drive_file():
             "message": "Error descargando el archivo",
             "error": str(e)
         }), 500
+

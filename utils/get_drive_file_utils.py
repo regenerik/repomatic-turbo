@@ -1,7 +1,11 @@
+import json
+import os
 import re
-import requests
 from io import BytesIO
 from datetime import datetime
+
+from google.oauth2 import service_account
+from google.auth.transport.requests import AuthorizedSession
 
 from database import db
 from models import DriveFileDownload
@@ -9,16 +13,33 @@ from logging_config import logger
 
 
 # ============================================================
-# CONFIGURACION DEL ARCHIVO
+# CONFIGURACION
 # ============================================================
 
-DEFAULT_DRIVE_URL = (
-    "https://docs.google.com/spreadsheets/d/"
-    "1uzK9UQOIW5JQD-4VR-paWrKTvpZM2ao_IGEGK0QSg0o/"
-    "edit?gid=1374924463#gid=1374924463"
+DEFAULT_DRIVE_URL = os.getenv(
+    "GOOGLE_DRIVE_FILE_URL",
+    (
+        "https://docs.google.com/spreadsheets/d/"
+        "1uzK9UQOIW5JQD-4VR-paWrKTvpZM2ao_IGEGK0QSg0o/"
+        "edit?gid=1374924463#gid=1374924463"
+    )
 )
 
-DEFAULT_FILE_NAME = "Rating_YPF.xlsx"
+DEFAULT_FILE_NAME = os.getenv(
+    "GOOGLE_DRIVE_FILE_NAME",
+    "Rating_YPF.xlsx"
+)
+
+GOOGLE_SERVICE_ACCOUNT_JSON_ENV = "GOOGLE_SERVICE_ACCOUNT_JSON"
+
+DRIVE_READONLY_SCOPE = (
+    "https://www.googleapis.com/auth/drive.readonly"
+)
+
+XLSX_MIME_TYPE = (
+    "application/vnd.openxmlformats-officedocument."
+    "spreadsheetml.sheet"
+)
 
 
 # ============================================================
@@ -38,59 +59,164 @@ def extract_google_file_id(url):
     ABC123
     """
 
-    match = re.search(r"/d/([a-zA-Z0-9_-]+)", url)
+    match = re.search(
+        r"/d/([a-zA-Z0-9_-]+)",
+        url
+    )
 
     if not match:
         raise ValueError(
-            "No se pudo obtener el ID del archivo desde la URL de Google Drive"
+            "No se pudo obtener el ID del archivo "
+            "desde la URL de Google Drive"
         )
 
     return match.group(1)
 
 
 # ============================================================
-# CONSTRUIR URL DE EXPORTACION
+# CARGAR CREDENCIALES DESDE VARIABLE DE ENTORNO
 # ============================================================
 
-def build_xlsx_export_url(drive_file_id):
+def build_google_credentials():
     """
-    Como el archivo es un Google Sheet nativo,
-    le pedimos a Google que lo exporte como XLSX.
+    Lee el JSON completo de la Service Account desde:
+
+    GOOGLE_SERVICE_ACCOUNT_JSON
+
+    No requiere guardar ningun archivo .json en el servidor.
+    """
+
+    raw_credentials = os.getenv(
+        GOOGLE_SERVICE_ACCOUNT_JSON_ENV
+    )
+
+    if not raw_credentials:
+        raise RuntimeError(
+            "Falta la variable de entorno "
+            "GOOGLE_SERVICE_ACCOUNT_JSON"
+        )
+
+    try:
+        service_account_info = json.loads(
+            raw_credentials
+        )
+
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            "GOOGLE_SERVICE_ACCOUNT_JSON no contiene "
+            "un JSON valido. "
+            f"Detalle: {str(e)}"
+        ) from e
+
+    if service_account_info.get("type") != "service_account":
+        raise RuntimeError(
+            "GOOGLE_SERVICE_ACCOUNT_JSON no parece "
+            "ser una credencial de Service Account"
+        )
+
+    required_fields = (
+        "project_id",
+        "private_key",
+        "client_email",
+        "token_uri"
+    )
+
+    missing_fields = [
+        field
+        for field in required_fields
+        if not service_account_info.get(field)
+    ]
+
+    if missing_fields:
+        raise RuntimeError(
+            "Faltan campos obligatorios en "
+            "GOOGLE_SERVICE_ACCOUNT_JSON: "
+            + ", ".join(missing_fields)
+        )
+
+    try:
+        credentials = (
+            service_account.Credentials
+            .from_service_account_info(
+                service_account_info,
+                scopes=[DRIVE_READONLY_SCOPE]
+            )
+        )
+
+    except Exception as e:
+        raise RuntimeError(
+            "No se pudieron construir las credenciales "
+            f"de Google: {str(e)}"
+        ) from e
+
+    return credentials
+
+
+# ============================================================
+# CONSTRUIR URL DE EXPORTACION DE DRIVE API
+# ============================================================
+
+def build_drive_export_url(drive_file_id):
+    """
+    Usa el endpoint oficial Drive API v3 files.export.
+    Sirve para exportar un Google Sheet nativo a XLSX.
     """
 
     return (
-        f"https://docs.google.com/spreadsheets/d/"
-        f"{drive_file_id}/export?format=xlsx"
+        "https://www.googleapis.com/drive/v3/files/"
+        f"{drive_file_id}/export"
     )
 
 
 # ============================================================
-# DESCARGAR GOOGLE SHEET COMO XLSX
+# DESCARGAR GOOGLE SHEET PRIVADO COMO XLSX
 # ============================================================
 
 def download_google_sheet_as_xlsx(drive_url):
-    drive_file_id = extract_google_file_id(drive_url)
 
-    export_url = build_xlsx_export_url(drive_file_id)
+    drive_file_id = extract_google_file_id(
+        drive_url
+    )
 
-    logger.info(
-        "Descargando Google Sheet. drive_file_id=%s",
+    credentials = build_google_credentials()
+
+    session = AuthorizedSession(
+        credentials
+    )
+
+    export_url = build_drive_export_url(
         drive_file_id
     )
 
-    response = requests.get(
-        export_url,
-        stream=True,
-        timeout=(15, 300),
-        allow_redirects=True
+    logger.info(
+        "Descargando Google Sheet privado. "
+        "drive_file_id=%s service_account=%s",
+        drive_file_id,
+        credentials.service_account_email
     )
 
-    response.raise_for_status()
+    response = session.get(
+        export_url,
+        params={
+            "mimeType": XLSX_MIME_TYPE
+        },
+        stream=True,
+        timeout=(15, 300)
+    )
 
-    # --------------------------------------------------------
-    # Google a veces devuelve una pagina HTML cuando el archivo
-    # necesita login/permisos.
-    # --------------------------------------------------------
+    if response.status_code != 200:
+
+        try:
+            error_detail = response.text[:2000]
+
+        except Exception:
+            error_detail = "<sin detalle>"
+
+        raise RuntimeError(
+            "Google Drive API rechazo la exportacion. "
+            f"HTTP {response.status_code}. "
+            f"Detalle: {error_detail}"
+        )
 
     content_type = response.headers.get(
         "Content-Type",
@@ -99,15 +225,9 @@ def download_google_sheet_as_xlsx(drive_url):
 
     if "text/html" in content_type:
         raise RuntimeError(
-            "Google devolvio HTML en lugar del Excel. "
-            "Probablemente el archivo no permite acceso publico "
-            "al servidor."
+            "Google devolvio HTML en lugar del XLSX. "
+            "Revisar permisos del archivo y la Service Account."
         )
-
-    # --------------------------------------------------------
-    # Lo construimos por chunks para no depender de response.content
-    # directamente.
-    # --------------------------------------------------------
 
     buffer = BytesIO()
 
@@ -124,8 +244,17 @@ def download_google_sheet_as_xlsx(drive_url):
             "Google Drive devolvio un archivo vacio"
         )
 
+    # XLSX internamente es un ZIP. Normalmente comienza con PK.
+    # Esto evita guardar una respuesta inesperada como si fuera Excel.
+    if not binary_data.startswith(b"PK"):
+        raise RuntimeError(
+            "La respuesta de Google no parece ser un XLSX valido"
+        )
+
     logger.info(
-        "Google Sheet descargado correctamente. size=%s bytes",
+        "Google Sheet descargado correctamente. "
+        "drive_file_id=%s size=%s bytes",
+        drive_file_id,
         len(binary_data)
     )
 
@@ -148,7 +277,9 @@ def process_drive_download(job_id):
        ↓
     running
        ↓
-    descarga Google
+    autentica Service Account
+       ↓
+    exporta Google Sheet privado a XLSX
        ↓
     guarda binario
        ↓
@@ -202,7 +333,7 @@ def process_drive_download(job_id):
 
         db.session.rollback()
 
-        # Recuperamos nuevamente el registro porque hicimos rollback
+        # Recuperamos nuevamente el registro porque hicimos rollback.
         job = DriveFileDownload.query.filter_by(
             job_id=job_id
         ).first()
@@ -215,10 +346,12 @@ def process_drive_download(job_id):
             db.session.commit()
 
         logger.error(
-            "Error descargando archivo de Drive. job_id=%s error=%s",
+            "Error descargando archivo de Drive. "
+            "job_id=%s error=%s",
             job_id,
             str(e),
             exc_info=True
         )
 
         raise
+
