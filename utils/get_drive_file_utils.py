@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time
 from io import BytesIO
 from datetime import datetime
 
@@ -153,18 +154,44 @@ def build_google_credentials():
 
 
 # ============================================================
-# CONSTRUIR URL DE EXPORTACION DE DRIVE API
+# CONSTRUIR URL DE DESCARGA LRO
 # ============================================================
 
-def build_drive_export_url(drive_file_id):
+def build_drive_download_url(drive_file_id):
     """
-    Usa el endpoint oficial Drive API v3 files.export.
-    Sirve para exportar un Google Sheet nativo a XLSX.
+    Usa el endpoint Drive API v3 files.download.
+
+    A diferencia de files.export, inicia una operacion
+    de larga duracion (Long Running Operation).
     """
 
     return (
         "https://www.googleapis.com/drive/v3/files/"
-        f"{drive_file_id}/export"
+        f"{drive_file_id}/download"
+    )
+
+
+# ============================================================
+# CONSTRUIR URL PARA CONSULTAR OPERACION
+# ============================================================
+
+def build_operation_url(operation_name):
+    """
+    Construye la URL de operations.get.
+
+    Google normalmente devuelve operation_name con formato:
+
+    operations/XXXXXXXX
+
+    El endpoint REST espera solamente el nombre de la operacion
+    despues de /operations/.
+    """
+
+    operation_id = operation_name.split("/")[-1]
+
+    return (
+        "https://www.googleapis.com/drive/v3/operations/"
+        f"{operation_id}"
     )
 
 
@@ -173,6 +200,21 @@ def build_drive_export_url(drive_file_id):
 # ============================================================
 
 def download_google_sheet_as_xlsx(drive_url):
+    """
+    Descarga una Google Sheet privada como XLSX usando
+    Drive API files.download.
+
+    Flujo:
+
+    1. Obtiene file_id desde la URL.
+    2. Autentica con Service Account.
+    3. Inicia files.download.
+    4. Google devuelve una Long Running Operation.
+    5. Consultamos operations.get hasta finalizar.
+    6. Obtenemos downloadUri.
+    7. Descargamos el XLSX.
+    8. Retornamos el binario para guardarlo en la DB.
+    """
 
     drive_file_id = extract_google_file_id(
         drive_url
@@ -184,27 +226,34 @@ def download_google_sheet_as_xlsx(drive_url):
         credentials
     )
 
-    export_url = build_drive_export_url(
+    download_url = build_drive_download_url(
         drive_file_id
     )
 
     logger.info(
-        "Descargando Google Sheet privado. "
+        "Iniciando descarga Google Sheet privado. "
         "drive_file_id=%s service_account=%s",
         drive_file_id,
         credentials.service_account_email
     )
 
-    response = session.get(
-        export_url,
+    # ========================================================
+    # 1. INICIAR LONG RUNNING OPERATION
+    # ========================================================
+
+    response = session.post(
+        download_url,
         params={
             "mimeType": XLSX_MIME_TYPE
         },
-        stream=True,
-        timeout=(15, 300)
+        headers={
+            "Accept": "application/json",
+            "Content-Length": "0"
+        },
+        timeout=(15, 60)
     )
 
-    if response.status_code != 200:
+    if response.status_code not in (200, 201):
 
         try:
             error_detail = response.text[:2000]
@@ -213,12 +262,177 @@ def download_google_sheet_as_xlsx(drive_url):
             error_detail = "<sin detalle>"
 
         raise RuntimeError(
-            "Google Drive API rechazo la exportacion. "
+            "Google Drive API rechazo el inicio "
+            "de la descarga. "
             f"HTTP {response.status_code}. "
             f"Detalle: {error_detail}"
         )
 
-    content_type = response.headers.get(
+    try:
+        operation_data = response.json()
+
+    except Exception as e:
+        raise RuntimeError(
+            "Google Drive no devolvio una operacion "
+            "JSON valida"
+        ) from e
+
+    operation_name = operation_data.get("name")
+
+    if not operation_name:
+        raise RuntimeError(
+            "Google Drive no devolvio el nombre "
+            "de la operacion. "
+            f"Respuesta: {operation_data}"
+        )
+
+    logger.info(
+        "Operacion Drive creada. "
+        "drive_file_id=%s operation=%s",
+        drive_file_id,
+        operation_name
+    )
+
+    # ========================================================
+    # 2. CONSULTAR OPERACION HASTA QUE TERMINE
+    # ========================================================
+
+    operation_url = build_operation_url(
+        operation_name
+    )
+
+    max_attempts = 150
+    wait_seconds = 2
+
+    final_operation = None
+
+    for attempt in range(
+        1,
+        max_attempts + 1
+    ):
+
+        # La respuesta inicial puede venir ya terminada.
+        if operation_data.get("done"):
+            final_operation = operation_data
+            break
+
+        logger.info(
+            "Esperando operacion Drive. "
+            "job_attempt=%s/%s operation=%s",
+            attempt,
+            max_attempts,
+            operation_name
+        )
+
+        time.sleep(
+            wait_seconds
+        )
+
+        operation_response = session.get(
+            operation_url,
+            timeout=(15, 60)
+        )
+
+        if operation_response.status_code != 200:
+
+            try:
+                error_detail = (
+                    operation_response.text[:2000]
+                )
+
+            except Exception:
+                error_detail = "<sin detalle>"
+
+            raise RuntimeError(
+                "Google Drive API rechazo la consulta "
+                "del estado de la operacion. "
+                f"HTTP {operation_response.status_code}. "
+                f"Detalle: {error_detail}"
+            )
+
+        try:
+            operation_data = (
+                operation_response.json()
+            )
+
+        except Exception as e:
+            raise RuntimeError(
+                "Google Drive devolvio una respuesta "
+                "invalida al consultar la operacion"
+            ) from e
+
+        if operation_data.get("done"):
+            final_operation = operation_data
+            break
+
+    if not final_operation:
+        raise TimeoutError(
+            "Google Drive tardo demasiado en preparar "
+            "la descarga del archivo"
+        )
+
+    # ========================================================
+    # 3. VALIDAR RESULTADO DE LA OPERACION
+    # ========================================================
+
+    if final_operation.get("error"):
+
+        raise RuntimeError(
+            "Google Drive fallo al preparar "
+            "la descarga. "
+            f"Detalle: {final_operation['error']}"
+        )
+
+    operation_result = final_operation.get(
+        "response",
+        {}
+    )
+
+    download_uri = operation_result.get(
+        "downloadUri"
+    )
+
+    if not download_uri:
+        raise RuntimeError(
+            "Google Drive termino la operacion pero "
+            "no devolvio downloadUri. "
+            f"Respuesta: {final_operation}"
+        )
+
+    logger.info(
+        "Archivo preparado por Google Drive. "
+        "drive_file_id=%s",
+        drive_file_id
+    )
+
+    # ========================================================
+    # 4. DESCARGAR XLSX FINAL
+    # ========================================================
+
+    file_response = session.get(
+        download_uri,
+        stream=True,
+        allow_redirects=True,
+        timeout=(15, 300)
+    )
+
+    if file_response.status_code != 200:
+
+        try:
+            error_detail = (
+                file_response.text[:2000]
+            )
+
+        except Exception:
+            error_detail = "<sin detalle>"
+
+        raise RuntimeError(
+            "No se pudo descargar el XLSX generado. "
+            f"HTTP {file_response.status_code}. "
+            f"Detalle: {error_detail}"
+        )
+
+    content_type = file_response.headers.get(
         "Content-Type",
         ""
     ).lower()
@@ -226,12 +440,13 @@ def download_google_sheet_as_xlsx(drive_url):
     if "text/html" in content_type:
         raise RuntimeError(
             "Google devolvio HTML en lugar del XLSX. "
-            "Revisar permisos del archivo y la Service Account."
+            "Revisar permisos del archivo y "
+            "la Service Account."
         )
 
     buffer = BytesIO()
 
-    for chunk in response.iter_content(
+    for chunk in file_response.iter_content(
         chunk_size=1024 * 1024
     ):
         if chunk:
@@ -244,11 +459,11 @@ def download_google_sheet_as_xlsx(drive_url):
             "Google Drive devolvio un archivo vacio"
         )
 
-    # XLSX internamente es un ZIP. Normalmente comienza con PK.
-    # Esto evita guardar una respuesta inesperada como si fuera Excel.
+    # XLSX internamente es un ZIP.
     if not binary_data.startswith(b"PK"):
         raise RuntimeError(
-            "La respuesta de Google no parece ser un XLSX valido"
+            "La respuesta de Google no parece "
+            "ser un XLSX valido"
         )
 
     logger.info(
@@ -279,7 +494,11 @@ def process_drive_download(job_id):
        ↓
     autentica Service Account
        ↓
-    exporta Google Sheet privado a XLSX
+    inicia files.download
+       ↓
+    espera Long Running Operation
+       ↓
+    descarga Google Sheet privado como XLSX
        ↓
     guarda binario
        ↓
@@ -307,9 +526,17 @@ def process_drive_download(job_id):
             job.source_url
         )
 
-        job.drive_file_id = result["drive_file_id"]
-        job.data = result["data"]
-        job.size_bytes = result["size_bytes"]
+        job.drive_file_id = result[
+            "drive_file_id"
+        ]
+
+        job.data = result[
+            "data"
+        ]
+
+        job.size_bytes = result[
+            "size_bytes"
+        ]
 
         job.status = "completed"
         job.finished_at = datetime.utcnow()
@@ -318,7 +545,8 @@ def process_drive_download(job_id):
         db.session.commit()
 
         logger.info(
-            "Job Drive completado. job_id=%s size=%s",
+            "Job Drive completado. "
+            "job_id=%s size=%s",
             job_id,
             result["size_bytes"]
         )
@@ -326,14 +554,17 @@ def process_drive_download(job_id):
         return {
             "job_id": job_id,
             "status": "completed",
-            "size_bytes": result["size_bytes"]
+            "size_bytes": result[
+                "size_bytes"
+            ]
         }
 
     except Exception as e:
 
         db.session.rollback()
 
-        # Recuperamos nuevamente el registro porque hicimos rollback.
+        # Recuperamos nuevamente el registro porque
+        # hicimos rollback.
         job = DriveFileDownload.query.filter_by(
             job_id=job_id
         ).first()
@@ -354,4 +585,3 @@ def process_drive_download(job_id):
         )
 
         raise
-
