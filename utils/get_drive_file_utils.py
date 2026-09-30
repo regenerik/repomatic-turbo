@@ -50,6 +50,17 @@ TARGET_SHEET_NAME = os.getenv(
     "Comentarios x orden"
 )
 
+EXPECTED_HEADERS = (
+    "order_id",
+    "survey_date",
+    "partner_id",
+    "partner_name",
+    "product_name",
+    "dish_rating",
+    "dish_pill",
+    "partner_comment"
+)
+
 GOOGLE_SERVICE_ACCOUNT_JSON_ENV = "GOOGLE_SERVICE_ACCOUNT_JSON"
 
 DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
@@ -392,12 +403,79 @@ def _find_sheet_name(workbook, wanted_name):
     )
 
 
+def _normalize_header_value(value):
+    if value is None:
+        return ""
+
+    return str(value).strip().casefold()
+
+
+def _is_expected_header_row(row):
+    """
+    Detecta la fila real de encabezados de "Comentarios x orden".
+
+    El archivo origen puede traer antes una fila de metadata como:
+    "Custom query: ... Last updated: ..."
+
+    Esa fila NO forma parte de los datos y debe descartarse.
+    """
+
+    normalized = [
+        _normalize_header_value(value)
+        for value in list(row)[:len(EXPECTED_HEADERS)]
+    ]
+
+    expected = [
+        header.casefold()
+        for header in EXPECTED_HEADERS
+    ]
+
+    return normalized == expected
+
+
+def _find_header_row_number(worksheet):
+    """
+    Devuelve el numero de fila (1-based) donde estan los encabezados.
+    Busca en las primeras 25 filas para tolerar metadata o filas vacias.
+    """
+
+    max_scan_rows = min(
+        worksheet.max_row,
+        25
+    )
+
+    for row_number in range(1, max_scan_rows + 1):
+        values = [
+            worksheet.cell(
+                row=row_number,
+                column=column_number
+            ).value
+            for column_number in range(
+                1,
+                len(EXPECTED_HEADERS) + 1
+            )
+        ]
+
+        if _is_expected_header_row(values):
+            return row_number
+
+    raise RuntimeError(
+        f"No se encontro el encabezado esperado en la hoja "
+        f"'{worksheet.title}'. Se esperaban las columnas: "
+        + ", ".join(EXPECTED_HEADERS)
+    )
+
+
 def keep_only_target_sheet(
     xlsx_binary,
     sheet_name=TARGET_SHEET_NAME
 ):
     """
-    Devuelve un XLSX que conserva solamente la hoja objetivo.
+    Devuelve un XLSX que:
+
+    - conserva solamente la hoja objetivo;
+    - elimina metadata/filas que aparezcan antes del encabezado real;
+    - deja los encabezados en la fila 1.
     """
 
     try:
@@ -420,6 +498,27 @@ def keep_only_target_sheet(
         for worksheet in list(workbook.worksheets):
             if worksheet.title != real_sheet_name:
                 workbook.remove(worksheet)
+
+        worksheet = workbook[real_sheet_name]
+
+        header_row_number = _find_header_row_number(
+            worksheet
+        )
+
+        if header_row_number > 1:
+            rows_to_delete = header_row_number - 1
+
+            logger.info(
+                "Eliminando metadata previa al encabezado. "
+                "sheet=%s rows=%s",
+                real_sheet_name,
+                rows_to_delete
+            )
+
+            worksheet.delete_rows(
+                1,
+                rows_to_delete
+            )
 
         output_buffer = BytesIO()
         workbook.save(output_buffer)
@@ -489,8 +588,10 @@ def extract_target_sheet_rows(
     sheet_name=TARGET_SHEET_NAME
 ):
     """
-    Lee los valores calculados de la hoja objetivo.
-    La primera fila se considera encabezado.
+    Lee la hoja objetivo ignorando cualquier metadata previa.
+
+    La primera fila devuelta siempre es el encabezado real:
+    order_id, survey_date, ..., partner_comment.
     """
 
     workbook = load_workbook(
@@ -506,9 +607,15 @@ def extract_target_sheet_rows(
         )
 
         worksheet = workbook[real_sheet_name]
+
+        header_row_number = _find_header_row_number(
+            worksheet
+        )
+
         rows = []
 
         for raw_row in worksheet.iter_rows(
+            min_row=header_row_number,
             values_only=True
         ):
             row = _trim_row(raw_row)
@@ -533,6 +640,11 @@ def extract_target_sheet_rows(
     if not rows:
         raise RuntimeError(
             f"La hoja '{sheet_name}' no contiene datos"
+        )
+
+    if not _is_expected_header_row(rows[0]):
+        raise RuntimeError(
+            f"La hoja '{sheet_name}' no tiene el encabezado esperado"
         )
 
     return rows
@@ -693,6 +805,148 @@ def get_history_rows(
     )
 
 
+def _find_header_index_in_rows(rows):
+    """
+    Devuelve el indice 0-based del encabezado real dentro de una
+    lista de filas obtenida desde Google Sheets.
+    """
+
+    for index, row in enumerate(rows[:25]):
+        if _is_expected_header_row(row):
+            return index
+
+    return None
+
+
+def normalize_history_sheet_layout(
+    session,
+    spreadsheet_id,
+    sheet_name=TARGET_SHEET_NAME
+):
+    """
+    Repara historicos creados con la version anterior del codigo.
+
+    Si encuentra metadata antes de los encabezados reales, elimina
+    esas filas en Google Sheets para que:
+
+    fila 1 = encabezados
+    fila 2+ = registros
+    """
+
+    ensure_history_sheet_exists(
+        session,
+        spreadsheet_id,
+        sheet_name
+    )
+
+    history_rows = get_history_rows(
+        session,
+        spreadsheet_id,
+        sheet_name
+    )
+
+    if not history_rows:
+        return history_rows
+
+    header_index = _find_header_index_in_rows(
+        history_rows
+    )
+
+    if header_index is None:
+        return history_rows
+
+    if header_index == 0:
+        return history_rows
+
+    metadata_url = (
+        "https://sheets.googleapis.com/v4/spreadsheets/"
+        f"{spreadsheet_id}"
+    )
+
+    metadata_response = session.get(
+        metadata_url,
+        params={
+            "fields": "sheets.properties(sheetId,title)"
+        },
+        timeout=(15, 60)
+    )
+
+    if metadata_response.status_code != 200:
+        raise RuntimeError(
+            "No se pudo obtener el sheetId para limpiar "
+            "el historico. "
+            f"HTTP {metadata_response.status_code}. "
+            f"Detalle: {metadata_response.text[:2000]}"
+        )
+
+    sheet_id = None
+
+    for item in metadata_response.json().get(
+        "sheets",
+        []
+    ):
+        properties = item.get(
+            "properties",
+            {}
+        )
+
+        if properties.get("title") == sheet_name:
+            sheet_id = properties.get("sheetId")
+            break
+
+    if sheet_id is None:
+        raise RuntimeError(
+            f"No se encontro el sheetId de '{sheet_name}'"
+        )
+
+    batch_update_url = (
+        "https://sheets.googleapis.com/v4/spreadsheets/"
+        f"{spreadsheet_id}:batchUpdate"
+    )
+
+    payload = {
+        "requests": [
+            {
+                "deleteDimension": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "dimension": "ROWS",
+                        "startIndex": 0,
+                        "endIndex": header_index
+                    }
+                }
+            }
+        ]
+    }
+
+    response = session.post(
+        batch_update_url,
+        json=payload,
+        timeout=(15, 60)
+    )
+
+    if response.status_code != 200:
+        raise RuntimeError(
+            "No se pudo eliminar la metadata previa "
+            "al encabezado del historico. "
+            f"HTTP {response.status_code}. "
+            f"Detalle: {response.text[:2000]}"
+        )
+
+    logger.info(
+        "Historico normalizado. "
+        "sheet=%s filas_eliminadas=%s",
+        sheet_name,
+        header_index
+    )
+
+    return get_history_rows(
+        session,
+        spreadsheet_id,
+        sheet_name
+    )
+
+
 def _normalize_cell_for_compare(value):
     if value is None:
         return ("empty", "")
@@ -734,8 +988,9 @@ def append_rows_to_history(
     """
     Acumula datos en el historico.
 
-    La primera fila es el encabezado.
-    Se omiten filas que ya existan exactamente en el historico.
+    - La primera fila recibida debe ser el encabezado real.
+    - Si el historico viejo tiene metadata en A1, la elimina.
+    - Se omiten filas que ya existan exactamente en el historico.
     """
 
     if not rows:
@@ -746,13 +1001,13 @@ def append_rows_to_history(
     source_header = rows[0]
     source_data_rows = rows[1:]
 
-    ensure_history_sheet_exists(
-        session,
-        spreadsheet_id,
-        sheet_name
-    )
+    if not _is_expected_header_row(source_header):
+        raise RuntimeError(
+            "El archivo origen no tiene el encabezado esperado "
+            f"para '{sheet_name}'"
+        )
 
-    history_rows = get_history_rows(
+    history_rows = normalize_history_sheet_layout(
         session,
         spreadsheet_id,
         sheet_name
@@ -856,7 +1111,6 @@ def append_rows_to_history(
         )
     }
 
-
 def update_history_from_rows(
     rows,
     source_file_id=None
@@ -939,7 +1193,7 @@ def download_history_as_xlsx():
     credentials = build_google_credentials()
     session = AuthorizedSession(credentials)
 
-    ensure_history_sheet_exists(
+    normalize_history_sheet_layout(
         session,
         history_file_id,
         TARGET_SHEET_NAME
