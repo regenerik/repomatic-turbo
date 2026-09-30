@@ -436,25 +436,27 @@ def _is_expected_header_row(row):
 def _find_header_row_number(worksheet):
     """
     Devuelve el numero de fila (1-based) donde estan los encabezados.
-    Busca en las primeras 25 filas para tolerar metadata o filas vacias.
+
+    Busca solamente en las primeras 25 filas para tolerar metadata
+    o filas vacias antes del encabezado real.
+
+    Importante:
+    en workbooks abiertos con read_only=True, openpyxl puede devolver
+    worksheet.max_row = None y worksheet.max_column = None.
+    Por eso NO usamos max_row/max_column para determinar el rango.
     """
 
-    max_scan_rows = min(
-        worksheet.max_row,
-        25
-    )
-
-    for row_number in range(1, max_scan_rows + 1):
-        values = [
-            worksheet.cell(
-                row=row_number,
-                column=column_number
-            ).value
-            for column_number in range(
-                1,
-                len(EXPECTED_HEADERS) + 1
-            )
-        ]
+    for row_number, raw_row in enumerate(
+        worksheet.iter_rows(
+            min_row=1,
+            max_row=25,
+            min_col=1,
+            max_col=len(EXPECTED_HEADERS),
+            values_only=True
+        ),
+        start=1
+    ):
+        values = list(raw_row)
 
         if _is_expected_header_row(values):
             return row_number
