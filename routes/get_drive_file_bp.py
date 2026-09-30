@@ -17,8 +17,10 @@ from logging_config import logger
 from utils.get_drive_file_utils import (
     process_drive_download,
     extract_google_file_id,
+    download_history_as_xlsx,
     DEFAULT_DRIVE_URL,
-    DEFAULT_FILE_NAME
+    DEFAULT_FILE_NAME,
+    DEFAULT_HISTORY_FILE_NAME
 )
 
 
@@ -48,12 +50,6 @@ def recuperar_drive_file():
             DEFAULT_DRIVE_URL
         )
 
-        # ----------------------------------------------------
-        # Creamos primero el registro.
-        # Así el endpoint de descarga ya sabe que existe
-        # aunque todavía esté trabajando.
-        # ----------------------------------------------------
-
         new_job = DriveFileDownload(
             job_id=job_id,
             drive_file_id=drive_file_id,
@@ -65,12 +61,6 @@ def recuperar_drive_file():
 
         db.session.add(new_job)
         db.session.commit()
-
-        # ----------------------------------------------------
-        # Necesitamos la instancia real de Flask porque
-        # el thread va a seguir trabajando después de que
-        # esta request haya terminado.
-        # ----------------------------------------------------
 
         app = current_app._get_current_object()
 
@@ -86,7 +76,10 @@ def recuperar_drive_file():
         )
 
         return jsonify({
-            "message": "La recuperacion del archivo desde Google Drive ha comenzado",
+            "message": (
+                "La recuperacion del archivo desde "
+                "Google Drive ha comenzado"
+            ),
             "job_id": job_id,
             "status": "queued",
 
@@ -94,7 +87,10 @@ def recuperar_drive_file():
                 f"/estado_drive_file/{job_id}",
 
             "download_url":
-                f"/descargar_drive_file?job_id={job_id}"
+                f"/descargar_drive_file?job_id={job_id}",
+
+            "historical_download_url":
+                "/descargar_drive_file_historico"
         }), 202
 
     except Exception as e:
@@ -108,7 +104,10 @@ def recuperar_drive_file():
         )
 
         return jsonify({
-            "message": "No se pudo iniciar la recuperacion del archivo",
+            "message": (
+                "No se pudo iniciar la recuperacion "
+                "del archivo"
+            ),
             "error": str(e)
         }), 500
 
@@ -128,13 +127,15 @@ def run_drive_download(app, job_id):
                 job_id
             )
 
-            process_drive_download(job_id)
+            process_drive_download(
+                job_id
+            )
 
     except Exception as e:
 
-        # El error ya queda registrado en DB desde el util.
         logger.error(
-            "Background Drive fallo. job_id=%s error=%s",
+            "Background Drive fallo. "
+            "job_id=%s error=%s",
             job_id,
             str(e),
             exc_info=True
@@ -167,7 +168,7 @@ def estado_drive_file(job_id):
 
 
 # ============================================================
-# DESCARGAR ARCHIVO
+# DESCARGAR ARCHIVO DIARIO
 # ============================================================
 
 @get_drive_file_bp.route(
@@ -178,12 +179,9 @@ def descargar_drive_file():
 
     try:
 
-        job_id = request.args.get("job_id")
-
-        # ----------------------------------------------------
-        # Si mandaron job_id buscamos ese.
-        # Si no, buscamos el último.
-        # ----------------------------------------------------
+        job_id = request.args.get(
+            "job_id"
+        )
 
         if job_id:
 
@@ -200,12 +198,11 @@ def descargar_drive_file():
         if not job:
 
             return jsonify({
-                "message": "No existe ninguna recuperacion del archivo"
+                "message": (
+                    "No existe ninguna recuperacion "
+                    "del archivo"
+                )
             }), 404
-
-        # ----------------------------------------------------
-        # Todavia trabajando
-        # ----------------------------------------------------
 
         if job.status in (
             "queued",
@@ -213,46 +210,44 @@ def descargar_drive_file():
         ):
 
             return jsonify({
-                "message": "El archivo todavia no esta disponible",
+                "message": (
+                    "El archivo todavia no esta "
+                    "disponible"
+                ),
                 "job_id": job.job_id,
                 "status": job.status
             }), 409
 
-        # ----------------------------------------------------
-        # Falló
-        # ----------------------------------------------------
-
         if job.status == "failed":
 
             return jsonify({
-                "message": "La recuperacion del archivo fallo",
+                "message": (
+                    "La recuperacion del archivo fallo"
+                ),
                 "job_id": job.job_id,
                 "status": job.status,
                 "error": job.error
             }), 409
 
-        # ----------------------------------------------------
-        # En teoría completed pero sin binario.
-        # Eso sería inconsistencia en DB.
-        # ----------------------------------------------------
-
         if not job.data:
 
             return jsonify({
-                "message": "El proceso termino pero el archivo no existe",
+                "message": (
+                    "El proceso termino pero "
+                    "el archivo no existe"
+                ),
                 "job_id": job.job_id
             }), 500
 
-        # ----------------------------------------------------
-        # Listo. Entregamos exactamente los bytes XLSX
-        # exportados desde Google Drive.
-        # ----------------------------------------------------
+        buffer = BytesIO(
+            job.data
+        )
 
-        buffer = BytesIO(job.data)
         buffer.seek(0)
 
         logger.info(
-            "Entregando archivo Drive. job_id=%s size=%s",
+            "Entregando archivo diario Drive. "
+            "job_id=%s size=%s",
             job.job_id,
             job.size_bytes
         )
@@ -283,3 +278,57 @@ def descargar_drive_file():
             "error": str(e)
         }), 500
 
+
+# ============================================================
+# DESCARGAR ARCHIVO HISTORICO
+# ============================================================
+
+@get_drive_file_bp.route(
+    "/descargar_drive_file_historico",
+    methods=["GET"]
+)
+def descargar_drive_file_historico():
+
+    try:
+
+        result = download_history_as_xlsx()
+
+        buffer = BytesIO(
+            result["data"]
+        )
+
+        buffer.seek(0)
+
+        logger.info(
+            "Entregando archivo historico Drive. "
+            "drive_file_id=%s size=%s",
+            result["drive_file_id"],
+            result["size_bytes"]
+        )
+
+        return send_file(
+            buffer,
+            download_name=(
+                DEFAULT_HISTORY_FILE_NAME
+            ),
+            as_attachment=True,
+            mimetype=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            )
+        )
+
+    except Exception as e:
+
+        logger.error(
+            "Error entregando historico Drive: %s",
+            str(e),
+            exc_info=True
+        )
+
+        return jsonify({
+            "message": (
+                "Error descargando el archivo historico"
+            ),
+            "error": str(e)
+        }), 500
